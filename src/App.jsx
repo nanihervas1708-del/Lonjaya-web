@@ -1,5 +1,6 @@
 import { useState, useEffect, useMemo, useCallback } from "react";
 import { storage } from "./lib/storage";
+import { signInAdmin, signOutAdmin, getAdminSession, onAdminAuthChange } from "./lib/auth";
 import {
   ShoppingCart, Search, X, Star, Plus, Minus, Trash2, ChevronRight,
   ChevronLeft, Anchor, Store, Package, TrendingUp, User, LogOut,
@@ -368,9 +369,26 @@ export default function App() {
       let c = await loadPersonal("lonja:cart", []);
       let u = await loadPersonal("lonja:user", null);
       let pts = await loadPersonal("lonja:points", 0);
+
+      // El admin nunca se restaura desde el almacenamiento "demo": se comprueba
+      // la sesión real de Supabase Auth. Si había una sesión de comprador/vendedor
+      // guardada pero resulta que era rol admin, se ignora (ya no es válida).
+      if (u?.role === "admin") u = null;
+      const adminUser = await getAdminSession();
+      if (adminUser) u = { name: adminUser.email, role: "admin", vendorId: null };
+
       setProducts(p); setVendors(v); setOrders(o); setCart(c); setUser(u); setPoints(pts);
       setReady(true);
     })();
+
+    const unsubscribe = onAdminAuthChange((adminUser) => {
+      if (adminUser) {
+        setUser({ name: adminUser.email, role: "admin", vendorId: null });
+      } else {
+        setUser((prev) => (prev?.role === "admin" ? null : prev));
+      }
+    });
+    return unsubscribe;
   }, []);
 
   const showToast = useCallback((msg) => {
@@ -419,15 +437,26 @@ export default function App() {
   const cartTotal = useMemo(() => cartLines.reduce((s, l) => s + l.product.price * l.qty, 0), [cartLines]);
   const cartCount = useMemo(() => cart.reduce((s, i) => s + i.qty, 0), [cart]);
 
-  /* -------- auth (demo) -------- */
+  /* -------- auth -------- */
+  // Comprador / vendedor: acceso de demostración, sin contraseña.
   const login = async (name, role, vendorId) => {
     const u = { name, role, vendorId: vendorId || null };
     setUser(u);
     await savePersonal("lonja:user", u);
-    showToast(`Sesión iniciada como ${role === "vendedor" ? "vendedor" : role === "admin" ? "administrador" : "comprador"}`);
-    goTo(role === "admin" ? "admin" : role === "vendedor" ? "vendor-dash" : "home");
+    showToast(`Sesión iniciada como ${role === "vendedor" ? "vendedor" : "comprador"}`);
+    goTo(role === "vendedor" ? "vendor-dash" : "home");
   };
+
+  // Admin: acceso real con email + contraseña vía Supabase Auth.
+  const loginAdmin = async (email, password) => {
+    const adminUser = await signInAdmin(email, password); // lanza error si falla
+    setUser({ name: adminUser.email, role: "admin", vendorId: null });
+    showToast("Sesión iniciada como administrador");
+    goTo("admin");
+  };
+
   const logout = async () => {
+    if (user?.role === "admin") await signOutAdmin();
     setUser(null);
     await savePersonal("lonja:user", null);
     goTo("home");
@@ -738,7 +767,7 @@ export default function App() {
           <CheckoutView lines={cartLines} total={cartTotal} user={user} placeOrder={placeOrder} goTo={goTo} />
         )}
         {view === "confirm" && <ConfirmView goTo={goTo} order={lastOrder} totalPoints={points} />}
-        {view === "login" && <LoginView login={login} vendors={vendors} goTo={goTo} />}
+        {view === "login" && <LoginView login={login} loginAdmin={loginAdmin} vendors={vendors} goTo={goTo} />}
         {view === "vendor-dash" && user?.role === "vendedor" && (
           <VendorDashboard
             vendor={vendorOf(user.vendorId)}
@@ -1429,18 +1458,34 @@ function ConfirmView({ goTo, order, totalPoints }) {
 /*  LOGIN (demo)                                                        */
 /* ------------------------------------------------------------------ */
 
-function LoginView({ login, vendors, goTo }) {
+function LoginView({ login, loginAdmin, vendors, goTo }) {
   const [name, setName] = useState("");
   const [role, setRole] = useState("comprador");
   const [vendorId, setVendorId] = useState(vendors[0]?.id || "");
 
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [adminError, setAdminError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+
+  const submitAdmin = async () => {
+    setAdminError("");
+    setSubmitting(true);
+    try {
+      await loginAdmin(email.trim(), password);
+    } catch (err) {
+      setAdminError("Email o contraseña incorrectos.");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
   return (
     <div className="mx-auto max-w-sm py-10">
       <h1 className="mb-1 text-xl font-semibold" style={{ fontFamily: "'Fraunces', serif" }}>Acceder a LonjaYa</h1>
-      <p className="mb-6 text-xs" style={{ color: "#5C6B6E" }}>Acceso de demostración — sin contraseña, elige un rol para explorar esa parte de la app.</p>
-
-      <label className="mb-1 block text-xs font-medium">Tu nombre</label>
-      <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Ej. Marta García" className="mb-4 w-full rounded border px-3 py-2 text-sm" style={{ borderColor: "#D9CBB3" }} />
+      <p className="mb-6 text-xs" style={{ color: "#5C6B6E" }}>
+        Comprador y vendedor son accesos de demostración. El acceso de administrador es real y requiere contraseña.
+      </p>
 
       <label className="mb-1 block text-xs font-medium">Entrar como</label>
       <div className="mb-4 grid grid-cols-3 gap-2">
@@ -1456,23 +1501,58 @@ function LoginView({ login, vendors, goTo }) {
         ))}
       </div>
 
-      {role === "vendedor" && (
+      {role === "admin" ? (
         <>
-          <label className="mb-1 block text-xs font-medium">Tu pescadería / lonja</label>
-          <select value={vendorId} onChange={(e) => setVendorId(e.target.value)} className="mb-4 w-full rounded border px-3 py-2 text-sm" style={{ borderColor: "#D9CBB3" }}>
-            {vendors.map((v) => <option key={v.id} value={v.id}>{v.name}</option>)}
-          </select>
+          <label className="mb-1 block text-xs font-medium">Email</label>
+          <input
+            type="email" value={email} onChange={(e) => setEmail(e.target.value)}
+            placeholder="admin@lonjaya.com" autoComplete="username"
+            className="mb-3 w-full rounded border px-3 py-2 text-sm" style={{ borderColor: "#D9CBB3" }}
+          />
+          <label className="mb-1 block text-xs font-medium">Contraseña</label>
+          <input
+            type="password" value={password} onChange={(e) => setPassword(e.target.value)}
+            placeholder="••••••••" autoComplete="current-password"
+            onKeyDown={(e) => e.key === "Enter" && email.trim() && password && submitAdmin()}
+            className="mb-1 w-full rounded border px-3 py-2 text-sm" style={{ borderColor: "#D9CBB3" }}
+          />
+          {adminError && <p className="mb-2 text-xs font-medium" style={{ color: "#B04A2F" }}>{adminError}</p>}
+          <p className="mb-4 mt-1 text-[11px]" style={{ color: "#5C6B6E" }}>
+            Este usuario se crea manualmente desde el panel de Supabase — no hay alta pública para administradores.
+          </p>
+          <button
+            disabled={!email.trim() || !password || submitting}
+            onClick={submitAdmin}
+            className="w-full rounded-md py-2.5 text-sm font-semibold text-white disabled:opacity-40"
+            style={{ backgroundColor: "#E85D42" }}
+          >
+            {submitting ? "Comprobando…" : "Entrar como administrador"}
+          </button>
+        </>
+      ) : (
+        <>
+          <label className="mb-1 block text-xs font-medium">Tu nombre</label>
+          <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Ej. Marta García" className="mb-4 w-full rounded border px-3 py-2 text-sm" style={{ borderColor: "#D9CBB3" }} />
+
+          {role === "vendedor" && (
+            <>
+              <label className="mb-1 block text-xs font-medium">Tu pescadería / lonja</label>
+              <select value={vendorId} onChange={(e) => setVendorId(e.target.value)} className="mb-4 w-full rounded border px-3 py-2 text-sm" style={{ borderColor: "#D9CBB3" }}>
+                {vendors.map((v) => <option key={v.id} value={v.id}>{v.name}</option>)}
+              </select>
+            </>
+          )}
+
+          <button
+            disabled={!name.trim()}
+            onClick={() => login(name.trim(), role, vendorId)}
+            className="w-full rounded-md py-2.5 text-sm font-semibold text-white disabled:opacity-40"
+            style={{ backgroundColor: "#E85D42" }}
+          >
+            Entrar
+          </button>
         </>
       )}
-
-      <button
-        disabled={!name.trim()}
-        onClick={() => login(name.trim(), role, vendorId)}
-        className="w-full rounded-md py-2.5 text-sm font-semibold text-white disabled:opacity-40"
-        style={{ backgroundColor: "#E85D42" }}
-      >
-        Entrar
-      </button>
       <button onClick={() => goTo("home")} className="mt-3 w-full text-xs font-medium" style={{ color: "#5C6B6E" }}>Cancelar</button>
     </div>
   );
