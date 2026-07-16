@@ -1,12 +1,12 @@
-import { useState, useEffect, useMemo, useCallback } from "react";
-import { storage } from "./lib/storage";
+import { useState, useEffect, useMemo, useCallback, useRef } from "react";
+import { storage, uploadProductImage } from "./lib/storage";
 import { signInAdmin, signOutAdmin, getAdminSession, onAdminAuthChange } from "./lib/auth";
 import {
   ShoppingCart, Search, X, Star, Plus, Minus, Trash2, ChevronRight,
   ChevronLeft, Anchor, Store, Package, TrendingUp, User, LogOut,
   Check, MapPin, Clock, SlidersHorizontal, ArrowLeft, ShieldCheck,
   PlusCircle, Pencil, BarChart3, Users, Waves, Snowflake, Sun,
-  Building2, Globe
+  Building2, Globe, ImagePlus
 } from "lucide-react";
 
 /* ------------------------------------------------------------------ */
@@ -146,6 +146,32 @@ const FRESH_LABEL = {
 };
 
 const eur = (n) => n.toLocaleString("es-ES", { style: "currency", currency: "EUR" });
+
+/**
+ * Tarifa de envío por peso total del pedido (en kg).
+ * 0–5kg: 10€ · luego +4€ cada 5kg adicionales, hasta 20kg.
+ * Por encima de 20kg se sigue extrapolando el mismo patrón (+4€/5kg) —
+ * revisar con el negocio si en algún momento se prefiere un tope distinto
+ * o pasar a "contactar para presupuesto" en pedidos muy grandes.
+ */
+const SHIPPING_BASE_KG = 5;
+const SHIPPING_BASE_PRICE = 10;
+const SHIPPING_STEP_KG = 5;
+const SHIPPING_STEP_PRICE = 4;
+
+/** Peso total del carrito en kg. Los productos que no se venden por kg
+ * (unidad, docena, caja) se cuentan como 1kg equivalente a efectos de envío. */
+function cartWeightKg(lines) {
+  return lines.reduce((sum, l) => sum + (l.product.unit === "kg" ? l.qty : l.qty * 1), 0);
+}
+
+function shippingCostForWeight(kg) {
+  if (kg <= 0) return 0;
+  if (kg <= SHIPPING_BASE_KG) return SHIPPING_BASE_PRICE;
+  const extraKg = kg - SHIPPING_BASE_KG;
+  const extraSteps = Math.ceil(extraKg / SHIPPING_STEP_KG);
+  return SHIPPING_BASE_PRICE + extraSteps * SHIPPING_STEP_PRICE;
+}
 
 /* Deterministic pseudo-rating/review-count per product id, so it's stable across renders */
 function hashStr(s) {
@@ -528,7 +554,8 @@ export default function App() {
   };
 
   /* -------- checkout -------- */
-  const placeOrder = async (shipping) => {
+  const placeOrder = async (shippingAddress, payment) => {
+    const shippingCost = shippingCostForWeight(cartWeightKg(cartLines));
     const earnedPoints = Math.round(cartTotal * LOYALTY_CONFIG.pointsPerEuro);
     const order = {
       id: "o" + Date.now(),
@@ -542,8 +569,11 @@ export default function App() {
           commissionRate: rate, commission: Math.round(gross * rate * 100) / 100, vendorPayout: Math.round(gross * (1 - rate) * 100) / 100,
         };
       }),
-      total: cartTotal,
-      shipping,
+      subtotal: cartTotal,
+      shippingCost,
+      total: cartTotal + shippingCost,
+      shippingAddress,
+      payment: payment || null, // { provider: "paypal", paypalOrderId, payerEmail }
       status: "confirmado",
       pointsEarned: earnedPoints,
     };
@@ -851,10 +881,10 @@ function ProductCard({ product, vendor, onOpen, onAdd }) {
       {isBestseller && <BestsellerRibbon />}
       <button onClick={() => onOpen(product.id)} className="flex flex-col items-start text-left">
         <div
-          className="flex h-36 w-full items-center justify-center text-6xl"
+          className="flex h-36 w-full items-center justify-center overflow-hidden text-6xl"
           style={{ background: "linear-gradient(160deg,#EAF2EF,#DCEAE3)" }}
         >
-          {product.emoji}
+          {product.image ? <img src={product.image} alt={product.name} className="h-full w-full object-cover" /> : product.emoji}
         </div>
         <div className="flex w-full flex-col gap-1.5 p-3">
           <div className="flex items-center justify-between gap-2">
@@ -1204,8 +1234,8 @@ function ProductView({ product, vendor, allProducts, vendors, addToCart, goTo })
         <ArrowLeft size={14} /> Volver
       </button>
       <div className="grid grid-cols-1 gap-8 lg:grid-cols-2">
-        <div className="flex items-center justify-center rounded-xl" style={{ background: "linear-gradient(160deg,#EAF2EF,#DCEAE3)", minHeight: 340 }}>
-          <span className="text-[140px]">{product.emoji}</span>
+        <div className="flex items-center justify-center overflow-hidden rounded-xl" style={{ background: "linear-gradient(160deg,#EAF2EF,#DCEAE3)", minHeight: 340 }}>
+          {product.image ? <img src={product.image} alt={product.name} className="h-full w-full object-cover" style={{ minHeight: 340 }} /> : <span className="text-[140px]">{product.emoji}</span>}
         </div>
         <div>
           <div className="flex items-center gap-1.5">
@@ -1267,7 +1297,9 @@ function ProductView({ product, vendor, allProducts, vendors, addToCart, goTo })
                       className="flex items-center gap-3 rounded-lg border bg-white p-2.5 text-left"
                       style={{ borderColor: "#E4D9C4" }}
                     >
-                      <span className="text-2xl">{alt.emoji}</span>
+                      <div className="flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded text-2xl" style={{ background: "#EAF2EF" }}>
+                        {alt.image ? <img src={alt.image} alt="" className="h-full w-full object-cover" /> : alt.emoji}
+                      </div>
                       <div className="flex-1">
                         <p className="text-xs font-semibold">{alt.name}</p>
                         <p className="text-[11px]" style={{ color: "#5C6B6E" }}>{av?.name}{av?.verified ? " · verificado" : ""}</p>
@@ -1290,6 +1322,9 @@ function ProductView({ product, vendor, allProducts, vendors, addToCart, goTo })
 /* ------------------------------------------------------------------ */
 
 function CartView({ lines, updateQty, removeFromCart, total, goTo }) {
+  const weightKg = cartWeightKg(lines);
+  const shippingCost = shippingCostForWeight(weightKg);
+
   if (lines.length === 0) {
     return (
       <div className="flex flex-col items-center gap-3 py-24 text-center">
@@ -1309,7 +1344,9 @@ function CartView({ lines, updateQty, removeFromCart, total, goTo }) {
         <div className="flex flex-col gap-3">
           {lines.map((l) => (
             <div key={l.productId} className="flex items-center gap-3 rounded-lg border bg-white p-3" style={{ borderColor: "#E4D9C4" }}>
-              <div className="flex h-16 w-16 shrink-0 items-center justify-center rounded text-3xl" style={{ background: "#EAF2EF" }}>{l.product.emoji}</div>
+              <div className="flex h-16 w-16 shrink-0 items-center justify-center rounded text-3xl overflow-hidden" style={{ background: "#EAF2EF" }}>
+                {l.product.image ? <img src={l.product.image} alt={l.product.name} className="h-full w-full object-cover" /> : l.product.emoji}
+              </div>
               <div className="flex-1">
                 <p className="text-sm font-semibold">{l.product.name}</p>
                 <p className="text-xs" style={{ color: "#5C6B6E" }}>{eur(l.product.price)}/{l.product.unit}</p>
@@ -1328,9 +1365,10 @@ function CartView({ lines, updateQty, removeFromCart, total, goTo }) {
       <div className="h-fit rounded-lg border bg-white p-5" style={{ borderColor: "#E4D9C4" }}>
         <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide" style={{ color: "#5C6B6E" }}>Resumen</h2>
         <div className="flex justify-between text-sm"><span>Subtotal</span><span>{eur(total)}</span></div>
-        <div className="flex justify-between text-sm"><span>Envío en frío</span><span>{total > 40 ? "Gratis" : eur(4.9)}</span></div>
+        <div className="flex justify-between text-xs" style={{ color: "#5C6B6E" }}><span>Peso estimado</span><span>{weightKg.toFixed(1)} kg</span></div>
+        <div className="flex justify-between text-sm"><span>Envío en frío</span><span>{eur(shippingCost)}</span></div>
         <div className="mt-3 flex justify-between border-t pt-3 text-base font-bold" style={{ borderColor: "#E4D9C4" }}>
-          <span>Total</span><span style={{ color: "#E85D42" }}>{eur(total > 40 ? total : total + 4.9)}</span>
+          <span>Total</span><span style={{ color: "#E85D42" }}>{eur(total + shippingCost)}</span>
         </div>
         <button onClick={() => goTo("checkout")} className="mt-4 w-full rounded-md py-2.5 text-sm font-semibold text-white" style={{ backgroundColor: "#E85D42" }}>
           Tramitar pedido
@@ -1347,7 +1385,10 @@ function CartView({ lines, updateQty, removeFromCart, total, goTo }) {
 function CheckoutView({ lines, total, user, placeOrder, goTo }) {
   const [form, setForm] = useState({ name: user?.name || "", address: "", city: "", postal: "", payment: "tarjeta" });
   const [submitting, setSubmitting] = useState(false);
-  const shipping = total > 40 ? 0 : 4.9;
+  const [payError, setPayError] = useState("");
+  const weightKg = cartWeightKg(lines);
+  const shipping = shippingCostForWeight(weightKg);
+  const grandTotal = total + shipping;
 
   const canSubmit = form.name && form.address && form.city && form.postal;
 
@@ -1364,20 +1405,24 @@ function CheckoutView({ lines, total, user, placeOrder, goTo }) {
             <input placeholder="Código postal" value={form.postal} onChange={(e) => setForm((f) => ({ ...f, postal: e.target.value }))} className="rounded border px-3 py-2 text-sm" style={{ borderColor: "#D9CBB3" }} />
           </div>
 
-          <h2 className="mb-3 mt-5 text-sm font-semibold">Pago (simulado)</h2>
-          <div className="flex gap-2">
-            {["tarjeta", "transferencia", "contrareembolso"].map((p) => (
-              <button
-                key={p}
-                onClick={() => setForm((f) => ({ ...f, payment: p }))}
-                className="rounded-md border px-3 py-1.5 text-xs font-medium capitalize"
-                style={{ borderColor: form.payment === p ? "#0E3A45" : "#D9CBB3", backgroundColor: form.payment === p ? "#0E3A45" : "white", color: form.payment === p ? "white" : "#16242A" }}
-              >
-                {p}
-              </button>
-            ))}
-          </div>
-          <p className="mt-2 text-[11px]" style={{ color: "#5C6B6E" }}>Este es un prototipo: no se procesa ningún pago real.</p>
+          <h2 className="mb-3 mt-5 text-sm font-semibold">Pago</h2>
+          {!canSubmit ? (
+            <p className="rounded-md border border-dashed p-3 text-xs" style={{ borderColor: "#D9CBB3", color: "#5C6B6E" }}>
+              Rellena la dirección de entrega para ver las opciones de pago.
+            </p>
+          ) : (
+            <PayPalCheckoutButton
+              amount={grandTotal}
+              submitting={submitting}
+              setSubmitting={setSubmitting}
+              onError={setPayError}
+              onSuccess={async (payment) => { await placeOrder(form, payment); }}
+            />
+          )}
+          {payError && <p className="mt-2 text-xs font-medium" style={{ color: "#B04A2F" }}>{payError}</p>}
+          <p className="mt-2 flex items-center gap-1 text-[11px]" style={{ color: "#5C6B6E" }}>
+            <ShieldCheck size={12} /> Pago seguro procesado por PayPal. LonjaYa nunca ve ni guarda los datos de tu tarjeta o cuenta.
+          </p>
 
           <div className="mt-5 flex items-start gap-2 rounded-lg border p-3" style={{ borderColor: "#2F6B5E33", backgroundColor: "#2F6B5E0D" }}>
             <Snowflake size={16} color="#2F6B5E" className="mt-0.5 shrink-0" />
@@ -1399,22 +1444,125 @@ function CheckoutView({ lines, total, user, placeOrder, goTo }) {
             </div>
           ))}
         </div>
-        <div className="mt-3 flex justify-between border-t pt-3 text-sm" style={{ borderColor: "#E4D9C4" }}>
-          <span>Envío</span><span>{shipping === 0 ? "Gratis" : eur(shipping)}</span>
+        <div className="mt-3 flex justify-between border-t pt-3 text-xs" style={{ borderColor: "#E4D9C4", color: "#5C6B6E" }}>
+          <span>Peso estimado</span><span>{weightKg.toFixed(1)} kg</span>
+        </div>
+        <div className="mt-1 flex justify-between text-sm">
+          <span>Envío</span><span>{eur(shipping)}</span>
         </div>
         <div className="mt-1 flex justify-between text-base font-bold">
-          <span>Total</span><span style={{ color: "#E85D42" }}>{eur(total + shipping)}</span>
+          <span>Total</span><span style={{ color: "#E85D42" }}>{eur(grandTotal)}</span>
         </div>
-        <button
-          disabled={!canSubmit || submitting}
-          onClick={async () => { setSubmitting(true); await placeOrder(form); }}
-          className="mt-4 w-full rounded-md py-2.5 text-sm font-semibold text-white disabled:opacity-40"
-          style={{ backgroundColor: "#E85D42" }}
-        >
-          {submitting ? "Confirmando…" : "Confirmar pedido"}
-        </button>
-        <button onClick={() => goTo("cart")} className="mt-2 w-full text-xs font-medium" style={{ color: "#5C6B6E" }}>Volver a la cesta</button>
+        <button onClick={() => goTo("cart")} className="mt-4 w-full text-xs font-medium" style={{ color: "#5C6B6E" }}>Volver a la cesta</button>
       </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  PAYPAL CHECKOUT BUTTON                                              */
+/* ------------------------------------------------------------------ */
+
+let paypalSdkPromise = null;
+
+function loadPayPalSdk() {
+  if (paypalSdkPromise) return paypalSdkPromise;
+  paypalSdkPromise = new Promise((resolve, reject) => {
+    if (window.paypal) return resolve(window.paypal);
+    const clientId = import.meta.env.VITE_PAYPAL_CLIENT_ID;
+    if (!clientId) {
+      reject(new Error("Falta configurar VITE_PAYPAL_CLIENT_ID"));
+      return;
+    }
+    const script = document.createElement("script");
+    script.src = `https://www.paypal.com/sdk/js?client-id=${clientId}&currency=EUR&intent=capture`;
+    script.onload = () => resolve(window.paypal);
+    script.onerror = () => reject(new Error("No se pudo cargar PayPal"));
+    document.body.appendChild(script);
+  });
+  return paypalSdkPromise;
+}
+
+function PayPalCheckoutButton({ amount, submitting, setSubmitting, onSuccess, onError }) {
+  const containerRef = useRef(null);
+  const buttonsRef = useRef(null);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    loadPayPalSdk()
+      .then((paypal) => {
+        if (cancelled || !containerRef.current) return;
+        if (buttonsRef.current) {
+          buttonsRef.current.close?.();
+        }
+        const buttons = paypal.Buttons({
+          style: { layout: "vertical", color: "gold", shape: "rect", label: "paypal" },
+          createOrder: async () => {
+            setSubmitting(true);
+            onError("");
+            const res = await fetch("/.netlify/functions/paypal-create-order", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ amount: amount.toFixed(2), currency: "EUR" }),
+            });
+            const data = await res.json();
+            if (!res.ok || !data.id) {
+              onError("No se pudo iniciar el pago con PayPal. Inténtalo de nuevo.");
+              setSubmitting(false);
+              throw new Error("No se pudo crear la orden de PayPal");
+            }
+            return data.id;
+          },
+          onApprove: async (data) => {
+            try {
+              const res = await fetch("/.netlify/functions/paypal-capture-order", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ orderID: data.orderID }),
+              });
+              const captureData = await res.json();
+              if (!res.ok || captureData.status !== "COMPLETED") {
+                onError("El pago no se pudo confirmar. Si se te ha cobrado, contacta con nosotros.");
+                setSubmitting(false);
+                return;
+              }
+              await onSuccess({
+                provider: "paypal",
+                paypalOrderId: captureData.paypalOrderId,
+                payerEmail: captureData.payerEmail,
+              });
+            } catch (err) {
+              onError("El pago no se pudo confirmar. Si se te ha cobrado, contacta con nosotros.");
+              setSubmitting(false);
+            }
+          },
+          onCancel: () => {
+            setSubmitting(false);
+          },
+          onError: () => {
+            onError("Ha ocurrido un error con PayPal. Inténtalo de nuevo.");
+            setSubmitting(false);
+          },
+        });
+        buttonsRef.current = buttons;
+        buttons.render(containerRef.current);
+      })
+      .catch((err) => onError(err.message));
+
+    return () => {
+      cancelled = true;
+      buttonsRef.current?.close?.();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [amount]);
+
+  return (
+    <div>
+      {submitting && (
+        <p className="mb-2 text-xs font-medium" style={{ color: "#5C6B6E" }}>Procesando pago…</p>
+      )}
+      <div ref={containerRef} />
     </div>
   );
 }
@@ -1681,7 +1829,7 @@ function SellerSignupView({ registerSeller, categories, goTo }) {
 /* ------------------------------------------------------------------ */
 
 function emptyProduct(vendorId) {
-  return { id: "p" + Date.now(), name: "", category: CATEGORIES[0].id, vendorId, price: 10, unit: "kg", stock: 10, freshness: "hoy", origin: "", emoji: "🐟", desc: "" };
+  return { id: "p" + Date.now(), name: "", category: CATEGORIES[0].id, vendorId, price: 10, unit: "kg", stock: 10, freshness: "hoy", origin: "", emoji: "🐟", image: null, desc: "" };
 }
 
 function VendorDashboard({ vendor, products, orders, upsertProduct, deleteProduct, categories }) {
@@ -1742,7 +1890,9 @@ function VendorDashboard({ vendor, products, orders, upsertProduct, deleteProduc
           <div className="flex flex-col gap-2">
             {products.map((p) => (
               <div key={p.id} className="flex items-center gap-3 rounded-lg border bg-white p-3" style={{ borderColor: "#E4D9C4" }}>
-                <span className="text-2xl">{p.emoji}</span>
+                <div className="flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded text-2xl" style={{ background: "#EAF2EF" }}>
+                  {p.image ? <img src={p.image} alt="" className="h-full w-full object-cover" /> : p.emoji}
+                </div>
                 <div className="flex-1">
                   <p className="text-sm font-semibold">{p.name}</p>
                   <p className="text-xs" style={{ color: "#5C6B6E" }}>{eur(p.price)}/{p.unit} · stock {p.stock}</p>
@@ -1803,6 +1953,32 @@ function StatCard({ icon: Icon, label, value }) {
 
 function ProductEditorModal({ product, categories, onClose, onSave }) {
   const [form, setForm] = useState(product);
+  const [uploading, setUploading] = useState(false);
+  const [uploadError, setUploadError] = useState("");
+
+  const handlePhoto = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (!file.type.startsWith("image/")) {
+      setUploadError("Elige un archivo de imagen (jpg, png, webp...).");
+      return;
+    }
+    if (file.size > 5 * 1024 * 1024) {
+      setUploadError("La imagen pesa demasiado (máximo 5MB).");
+      return;
+    }
+    setUploadError("");
+    setUploading(true);
+    try {
+      const url = await uploadProductImage(file);
+      setForm((f) => ({ ...f, image: url }));
+    } catch (err) {
+      setUploadError("No se pudo subir la foto. Inténtalo de nuevo.");
+    } finally {
+      setUploading(false);
+    }
+  };
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
       <div className="w-full max-w-md rounded-lg bg-white p-5">
@@ -1811,6 +1987,26 @@ function ProductEditorModal({ product, categories, onClose, onSave }) {
           <button onClick={onClose}><X size={18} /></button>
         </div>
         <div className="flex flex-col gap-2.5">
+          <label className="mb-1 block text-xs font-medium" style={{ color: "#5C6B6E" }}>Foto del producto</label>
+          <div className="flex items-center gap-3">
+            <div className="flex h-16 w-16 shrink-0 items-center justify-center overflow-hidden rounded-lg text-3xl" style={{ background: "#EAF2EF" }}>
+              {form.image ? <img src={form.image} alt="" className="h-full w-full object-cover" /> : form.emoji}
+            </div>
+            <div className="flex-1">
+              <label className="inline-flex cursor-pointer items-center gap-1.5 rounded-md border px-3 py-1.5 text-xs font-medium" style={{ borderColor: "#D9CBB3" }}>
+                <ImagePlus size={14} /> {uploading ? "Subiendo…" : "Subir foto"}
+                <input type="file" accept="image/*" className="hidden" onChange={handlePhoto} disabled={uploading} />
+              </label>
+              {form.image && (
+                <button onClick={() => setForm((f) => ({ ...f, image: null }))} className="ml-2 text-xs" style={{ color: "#B04A2F" }}>
+                  Quitar foto
+                </button>
+              )}
+              {uploadError && <p className="mt-1 text-[11px]" style={{ color: "#B04A2F" }}>{uploadError}</p>}
+              {!form.image && <p className="mt-1 text-[11px]" style={{ color: "#5C6B6E" }}>Sin foto, se mostrará el emoji como marcador.</p>}
+            </div>
+          </div>
+
           <input placeholder="Nombre" value={form.name} onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} className="rounded border px-3 py-2 text-sm" style={{ borderColor: "#D9CBB3" }} />
           <select value={form.category} onChange={(e) => setForm((f) => ({ ...f, category: e.target.value }))} className="rounded border px-3 py-2 text-sm" style={{ borderColor: "#D9CBB3" }}>
             {categories.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
@@ -1828,11 +2024,11 @@ function ProductEditorModal({ product, categories, onClose, onSave }) {
             </select>
           </div>
           <input placeholder="Origen (ej. Rías Baixas)" value={form.origin} onChange={(e) => setForm((f) => ({ ...f, origin: e.target.value }))} className="rounded border px-3 py-2 text-sm" style={{ borderColor: "#D9CBB3" }} />
-          <input placeholder="Emoji (ej. 🐟)" value={form.emoji} onChange={(e) => setForm((f) => ({ ...f, emoji: e.target.value }))} className="rounded border px-3 py-2 text-sm" style={{ borderColor: "#D9CBB3" }} />
+          <input placeholder="Emoji de respaldo (ej. 🐟)" value={form.emoji} onChange={(e) => setForm((f) => ({ ...f, emoji: e.target.value }))} className="rounded border px-3 py-2 text-sm" style={{ borderColor: "#D9CBB3" }} />
           <textarea placeholder="Descripción" value={form.desc} onChange={(e) => setForm((f) => ({ ...f, desc: e.target.value }))} rows={2} className="rounded border px-3 py-2 text-sm" style={{ borderColor: "#D9CBB3" }} />
         </div>
         <button
-          disabled={!form.name}
+          disabled={!form.name || uploading}
           onClick={() => onSave(form)}
           className="mt-4 w-full rounded-md py-2.5 text-sm font-semibold text-white disabled:opacity-40"
           style={{ backgroundColor: "#0E3A45" }}

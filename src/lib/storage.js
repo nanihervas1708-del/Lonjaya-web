@@ -38,6 +38,22 @@ function getDeviceId() {
  *   storage.delete(key, shared)
  *   storage.list(prefix, shared)
  */
+/**
+ * Sube una foto de producto al bucket público "product-images" y devuelve
+ * su URL pública, lista para guardar en product.image.
+ */
+export async function uploadProductImage(file) {
+  const ext = file.name.split(".").pop();
+  const path = `${crypto.randomUUID()}.${ext}`;
+  const { error } = await supabase.storage.from("product-images").upload(path, file, {
+    cacheControl: "3600",
+    upsert: false,
+  });
+  if (error) throw error;
+  const { data } = supabase.storage.from("product-images").getPublicUrl(path);
+  return data.publicUrl;
+}
+
 export const storage = {
   async get(key, shared = false) {
     const userId = shared ? null : getDeviceId();
