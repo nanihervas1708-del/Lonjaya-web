@@ -1,8 +1,9 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import { storage, uploadProductImage } from "./lib/storage";
+import { trackPageView, trackProductView, trackSearch, trackHeartbeat, fetchAnalyticsSummary } from "./lib/analytics";
 import { signInAdmin, signOutAdmin, getAdminSession, onAdminAuthChange } from "./lib/auth";
 import {
-  ShoppingCart, Search, X, Star, Plus, Minus, Trash2, ChevronRight,
+  ShoppingCart, Search, X, Star, Plus, Minus, Trash2, ChevronRight, ChevronDown,
   ChevronLeft, Anchor, Store, Package, TrendingUp, User, LogOut,
   Check, MapPin, Clock, SlidersHorizontal, ArrowLeft, ShieldCheck,
   PlusCircle, Pencil, BarChart3, Users, Waves, Snowflake, Sun,
@@ -405,6 +406,7 @@ export default function App() {
 
       setProducts(p); setVendors(v); setOrders(o); setCart(c); setUser(u); setPoints(pts);
       setReady(true);
+      trackPageView("home");
     })();
 
     const unsubscribe = onAdminAuthChange((adminUser) => {
@@ -414,7 +416,18 @@ export default function App() {
         setUser((prev) => (prev?.role === "admin" ? null : prev));
       }
     });
-    return unsubscribe;
+
+    // "Latido" cada 20s mientras la pestaña está activa, para poder calcular
+    // el tiempo medio de visita en el panel de admin sin depender de un
+    // evento de "salida" (que en el navegador no siempre llega a tiempo).
+    const heartbeat = setInterval(() => {
+      if (document.visibilityState === "visible") trackHeartbeat();
+    }, 20000);
+
+    return () => {
+      unsubscribe();
+      clearInterval(heartbeat);
+    };
   }, []);
 
   const showToast = useCallback((msg) => {
@@ -428,6 +441,11 @@ export default function App() {
     setMenuOpen(false);
     if (extra.category !== undefined) setActiveCategory(extra.category);
     if (extra.productId !== undefined) setActiveProductId(extra.productId);
+    trackPageView(v);
+    if (v === "product" && extra.productId) {
+      const p = products.find((x) => x.id === extra.productId);
+      if (p) trackProductView(p.id, p.name);
+    }
   };
 
   /* -------- cart ops -------- */
@@ -565,7 +583,7 @@ export default function App() {
         const rate = vendors.find((v) => v.id === l.product.vendorId)?.commissionRate ?? DEFAULT_COMMISSION;
         const gross = l.product.price * l.qty;
         return {
-          productId: l.productId, name: l.product.name, vendorId: l.product.vendorId, qty: l.qty, price: l.product.price,
+          productId: l.productId, name: l.product.name, vendorId: l.product.vendorId, qty: l.qty, unit: l.product.unit, price: l.product.price,
           commissionRate: rate, commission: Math.round(gross * rate * 100) / 100, vendorPayout: Math.round(gross * (1 - rate) * 100) / 100,
         };
       }),
@@ -665,12 +683,11 @@ export default function App() {
             <input
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && goTo("catalog", { category: null })}
-              placeholder="Buscar merluza, gamba roja, pulpo…"
+              onKeyDown={(e) => { if (e.key === "Enter") { trackSearch(searchQuery); goTo("catalog", { category: null }); } }}
               className="w-full bg-transparent px-2 text-sm outline-none"
             />
             <button
-              onClick={() => goTo("catalog", { category: null })}
+              onClick={() => { trackSearch(searchQuery); goTo("catalog", { category: null }); }}
               className="rounded px-3 py-1 text-xs font-semibold text-white"
               style={{ backgroundColor: "#E85D42" }}
             >
@@ -698,6 +715,11 @@ export default function App() {
                 {user.role === "comprador" && points > 0 && (
                   <span className="ml-1 rounded-full px-1.5 py-0.5 text-[10px] font-bold" style={{ backgroundColor: "#B08900", color: "#16242A" }}>
                     🎣 {points}
+                  </span>
+                )}
+                {user.role === "admin" && vendors.filter((v) => v.status === "pendiente").length > 0 && (
+                  <span className="ml-1 rounded-full px-1.5 py-0.5 text-[10px] font-bold text-white" style={{ backgroundColor: "#E85D42" }}>
+                    {vendors.filter((v) => v.status === "pendiente").length} pendiente{vendors.filter((v) => v.status === "pendiente").length > 1 ? "s" : ""}
                   </span>
                 )}
               </button>
@@ -731,7 +753,7 @@ export default function App() {
             <input
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && goTo("catalog", { category: null })}
+              onKeyDown={(e) => { if (e.key === "Enter") { trackSearch(searchQuery); goTo("catalog", { category: null }); } }}
               placeholder="Buscar…"
               className="w-full bg-transparent px-2 text-sm outline-none"
             />
@@ -1383,7 +1405,7 @@ function CartView({ lines, updateQty, removeFromCart, total, goTo }) {
 /* ------------------------------------------------------------------ */
 
 function CheckoutView({ lines, total, user, placeOrder, goTo }) {
-  const [form, setForm] = useState({ name: user?.name || "", address: "", city: "", postal: "", payment: "tarjeta" });
+  const [form, setForm] = useState({ name: user?.role === "comprador" ? user?.name || "" : "", address: "", city: "", postal: "", payment: "tarjeta", ageRange: "" });
   const [submitting, setSubmitting] = useState(false);
   const [payError, setPayError] = useState("");
   const weightKg = cartWeightKg(lines);
@@ -1403,6 +1425,15 @@ function CheckoutView({ lines, total, user, placeOrder, goTo }) {
             <input placeholder="Dirección" value={form.address} onChange={(e) => setForm((f) => ({ ...f, address: e.target.value }))} className="rounded border px-3 py-2 text-sm sm:col-span-2" style={{ borderColor: "#D9CBB3" }} />
             <input placeholder="Ciudad" value={form.city} onChange={(e) => setForm((f) => ({ ...f, city: e.target.value }))} className="rounded border px-3 py-2 text-sm" style={{ borderColor: "#D9CBB3" }} />
             <input placeholder="Código postal" value={form.postal} onChange={(e) => setForm((f) => ({ ...f, postal: e.target.value }))} className="rounded border px-3 py-2 text-sm" style={{ borderColor: "#D9CBB3" }} />
+            <select value={form.ageRange} onChange={(e) => setForm((f) => ({ ...f, ageRange: e.target.value }))} className="rounded border px-3 py-2 text-sm sm:col-span-2" style={{ borderColor: "#D9CBB3", color: form.ageRange ? "#16242A" : "#5C6B6E" }}>
+              <option value="">Rango de edad (opcional)</option>
+              <option value="18-25">18–25</option>
+              <option value="26-35">26–35</option>
+              <option value="36-45">36–45</option>
+              <option value="46-55">46–55</option>
+              <option value="56-65">56–65</option>
+              <option value="66+">66 o más</option>
+            </select>
           </div>
 
           <h2 className="mb-3 mt-5 text-sm font-semibold">Pago</h2>
@@ -2044,12 +2075,131 @@ function ProductEditorModal({ product, categories, onClose, onSave }) {
 /*  ADMIN                                                               */
 /* ------------------------------------------------------------------ */
 
+/* ------------------------------------------------------------------ */
+/*  INFORME DE VENTAS DIARIAS                                           */
+/* ------------------------------------------------------------------ */
+
+function DailySalesReport({ orders, vendors }) {
+  const days = useMemo(() => {
+    const byDate = new Map();
+    for (const o of orders) {
+      const key = new Date(o.date).toISOString().slice(0, 10); // YYYY-MM-DD
+      if (!byDate.has(key)) byDate.set(key, []);
+      for (const l of o.lines) {
+        byDate.get(key).push({
+          vendorName: vendors.find((v) => v.id === l.vendorId)?.name || "Vendedor eliminado",
+          productName: l.name,
+          qty: l.qty,
+          unit: l.unit,
+          amount: l.price * l.qty,
+        });
+      }
+    }
+    return [...byDate.entries()]
+      .sort((a, b) => b[0].localeCompare(a[0]))
+      .map(([key, lines]) => ({
+        key,
+        label: new Date(`${key}T00:00:00`).toLocaleDateString("es-ES", { weekday: "long", day: "numeric", month: "long", year: "numeric" }),
+        lines,
+        totalAmount: lines.reduce((s, l) => s + l.amount, 0),
+        totalUnits: lines.reduce((s, l) => s + l.qty, 0),
+      }));
+  }, [orders, vendors]);
+
+  const [expanded, setExpanded] = useState(() => new Set(days[0] ? [days[0].key] : []));
+  const toggle = (key) => setExpanded((prev) => {
+    const next = new Set(prev);
+    next.has(key) ? next.delete(key) : next.add(key);
+    return next;
+  });
+
+  return (
+    <div className="mb-8">
+      <h2 className="mb-1 flex items-center gap-1.5 text-sm font-semibold uppercase tracking-wide" style={{ color: "#5C6B6E" }}>
+        <BarChart3 size={13} /> Ventas diarias
+      </h2>
+      <p className="mb-3 text-[11px]" style={{ color: "#5C6B6E" }}>Por producto, cantidad y empresa vendedora.</p>
+
+      {days.length === 0 ? (
+        <p className="rounded-lg border border-dashed p-4 text-xs" style={{ borderColor: "#D9CBB3", color: "#5C6B6E" }}>
+          Todavía no hay ventas registradas.
+        </p>
+      ) : (
+        <div className="flex flex-col gap-2">
+          {days.map((day) => {
+            const isOpen = expanded.has(day.key);
+            return (
+              <div key={day.key} className="overflow-hidden rounded-lg border bg-white" style={{ borderColor: "#E4D9C4" }}>
+                <button
+                  onClick={() => toggle(day.key)}
+                  className="flex w-full items-center justify-between gap-3 p-3 text-left"
+                >
+                  <div className="flex items-center gap-2">
+                    {isOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                    <span className="text-sm font-semibold capitalize">{day.label}</span>
+                  </div>
+                  <div className="flex items-center gap-4 text-xs" style={{ color: "#5C6B6E" }}>
+                    <span>{day.totalUnits} uds.</span>
+                    <span className="font-semibold" style={{ color: "#2F6B5E", fontFamily: "'IBM Plex Mono', monospace" }}>{eur(day.totalAmount)}</span>
+                  </div>
+                </button>
+                {isOpen && (
+                  <div className="border-t" style={{ borderColor: "#E4D9C4" }}>
+                    <table className="w-full text-xs">
+                      <thead>
+                        <tr style={{ backgroundColor: "#F6F8F7" }}>
+                          <th className="px-3 py-2 text-left font-medium" style={{ color: "#5C6B6E" }}>Producto</th>
+                          <th className="px-3 py-2 text-left font-medium" style={{ color: "#5C6B6E" }}>Empresa / vendedor</th>
+                          <th className="px-3 py-2 text-right font-medium" style={{ color: "#5C6B6E" }}>Cantidad</th>
+                          <th className="px-3 py-2 text-right font-medium" style={{ color: "#5C6B6E" }}>Importe</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {day.lines.map((l, i) => (
+                          <tr key={i} className="border-t" style={{ borderColor: "#EFEAE0" }}>
+                            <td className="px-3 py-2">{l.productName}</td>
+                            <td className="px-3 py-2">{l.vendorName}</td>
+                            <td className="px-3 py-2 text-right">{l.qty} {l.unit || ""}</td>
+                            <td className="px-3 py-2 text-right" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{eur(l.amount)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function AdminView({ vendors, products, orders, setVendorStatus, setVendorCommission, addVendor }) {
   const [showNew, setShowNew] = useState(false);
+  const [analytics, setAnalytics] = useState(null);
+  const [analyticsLoading, setAnalyticsLoading] = useState(true);
   const totalRevenue = orders.reduce((s, o) => s + o.total, 0);
   const totalCommission = orders.reduce((s, o) => s + o.lines.reduce((s2, l) => s2 + (l.commission ?? 0), 0), 0);
   const pending = vendors.filter((v) => v.status === "pendiente");
   const active = vendors.filter((v) => v.status !== "pendiente");
+
+  useEffect(() => {
+    fetchAnalyticsSummary(30)
+      .then(setAnalytics)
+      .finally(() => setAnalyticsLoading(false));
+  }, []);
+
+  const ageBreakdown = useMemo(() => {
+    const counts = new Map();
+    for (const o of orders) {
+      const range = o.shippingAddress?.ageRange;
+      if (range) counts.set(range, (counts.get(range) || 0) + 1);
+    }
+    const total = [...counts.values()].reduce((s, n) => s + n, 0);
+    return { entries: [...counts.entries()].sort((a, b) => b[1] - a[1]), total };
+  }, [orders]);
 
   return (
     <div>
@@ -2068,6 +2218,94 @@ function AdminView({ vendors, products, orders, setVendorStatus, setVendorCommis
         <StatCard icon={TrendingUp} label="Ventas totales (GMV)" value={eur(totalRevenue)} />
         <StatCard icon={ShieldCheck} label="Comisión generada" value={eur(totalCommission)} />
       </div>
+
+      {/* ANALÍTICA DE VISITAS */}
+      <div className="mb-8">
+        <h2 className="mb-1 flex items-center gap-1.5 text-sm font-semibold uppercase tracking-wide" style={{ color: "#5C6B6E" }}>
+          <TrendingUp size={13} /> Analítica de visitas (últimos 30 días)
+        </h2>
+        {analyticsLoading ? (
+          <p className="text-xs" style={{ color: "#5C6B6E" }}>Cargando…</p>
+        ) : !analytics?.hasAccess ? (
+          <p className="rounded-lg border border-dashed p-3 text-xs" style={{ borderColor: "#D9CBB3", color: "#5C6B6E" }}>
+            No se pudo cargar la analítica (revisa que tu sesión de admin siga activa).
+          </p>
+        ) : (
+          <>
+            <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-3">
+              <StatCard icon={Users} label="Visitas (sesiones)" value={analytics.visits} />
+              <StatCard icon={Clock} label="Tiempo medio en la web" value={`${analytics.avgMinutes.toFixed(1)} min`} />
+              <StatCard icon={MapPin} label="Zonas distintas" value={analytics.topPlaces.length} />
+            </div>
+
+            <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-3">
+              <div className="rounded-lg border bg-white p-4" style={{ borderColor: "#E4D9C4" }}>
+                <p className="mb-2 text-xs font-semibold" style={{ color: "#5C6B6E" }}>Productos más vistos</p>
+                {analytics.topProducts.length === 0 && <p className="text-xs" style={{ color: "#5C6B6E" }}>Todavía sin datos.</p>}
+                <div className="flex flex-col gap-1.5">
+                  {analytics.topProducts.map((p) => (
+                    <div key={p.label} className="flex items-center justify-between text-xs">
+                      <span className="truncate">{p.label}</span>
+                      <span className="font-semibold" style={{ color: "#2F6B5E" }}>{p.count}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="rounded-lg border bg-white p-4" style={{ borderColor: "#E4D9C4" }}>
+                <p className="mb-2 text-xs font-semibold" style={{ color: "#5C6B6E" }}>Búsquedas más frecuentes</p>
+                {analytics.topSearches.length === 0 && <p className="text-xs" style={{ color: "#5C6B6E" }}>Todavía sin datos.</p>}
+                <div className="flex flex-col gap-1.5">
+                  {analytics.topSearches.map((s) => (
+                    <div key={s.label} className="flex items-center justify-between text-xs">
+                      <span className="truncate">"{s.label}"</span>
+                      <span className="font-semibold" style={{ color: "#2F6B5E" }}>{s.count}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="rounded-lg border bg-white p-4" style={{ borderColor: "#E4D9C4" }}>
+                <p className="mb-2 text-xs font-semibold" style={{ color: "#5C6B6E" }}>De dónde nos visitan</p>
+                {analytics.topPlaces.length === 0 && <p className="text-xs" style={{ color: "#5C6B6E" }}>Todavía sin datos.</p>}
+                <div className="flex flex-col gap-1.5">
+                  {analytics.topPlaces.map((pl) => (
+                    <div key={pl.label} className="flex items-center justify-between text-xs">
+                      <span className="truncate">{pl.label}</span>
+                      <span className="font-semibold" style={{ color: "#2F6B5E" }}>{pl.count}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            <div className="mt-3 rounded-lg border bg-white p-4" style={{ borderColor: "#E4D9C4" }}>
+              <p className="mb-2 text-xs font-semibold" style={{ color: "#5C6B6E" }}>Rango de edad de los compradores</p>
+              <p className="mb-2 text-[11px]" style={{ color: "#5C6B6E" }}>
+                Autodeclarado de forma opcional en el checkout — no es posible ni ético deducir la edad real de un visitante solo con datos de navegación, así que estos datos solo existen para quien decide indicarlo al comprar.
+              </p>
+              {ageBreakdown.total === 0 ? (
+                <p className="text-xs" style={{ color: "#5C6B6E" }}>Todavía nadie lo ha indicado en sus pedidos.</p>
+              ) : (
+                <div className="flex flex-col gap-1.5">
+                  {ageBreakdown.entries.map(([range, count]) => (
+                    <div key={range} className="flex items-center gap-2">
+                      <span className="w-14 shrink-0 text-xs">{range}</span>
+                      <div className="h-2 flex-1 overflow-hidden rounded-full" style={{ backgroundColor: "#E4D9C4" }}>
+                        <div className="h-full rounded-full" style={{ width: `${(count / ageBreakdown.total) * 100}%`, backgroundColor: "#2F6B5E" }} />
+                      </div>
+                      <span className="w-6 shrink-0 text-right text-xs font-semibold">{count}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </>
+        )}
+      </div>
+
+      {/* VENTAS DIARIAS */}
+      <DailySalesReport orders={orders} vendors={vendors} />
 
       {pending.length > 0 && (
         <div className="mb-8">
