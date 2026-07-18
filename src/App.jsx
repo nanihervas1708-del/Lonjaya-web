@@ -3,6 +3,7 @@ import { storage, uploadProductImage } from "./lib/storage";
 import { trackPageView, trackProductView, trackSearch, trackHeartbeat, fetchAnalyticsSummary } from "./lib/analytics";
 import { signIn, signUpVendor, signOut, getAuthSession, onAuthChange, isVendorAccount } from "./lib/auth";
 import { fetchVendors, fetchProducts, upsertVendorRow, bulkInsertVendors, upsertProductRow, bulkInsertProducts, deleteProductRow } from "./lib/marketplace";
+import { sendEmail, buildOrderConfirmationEmail, buildVendorNewOrderEmail, buildAdminNewVendorEmail } from "./lib/emails";
 import {
   ShoppingCart, Search, X, Star, Plus, Minus, Trash2, ChevronRight, ChevronDown,
   ChevronLeft, Anchor, Store, Package, TrendingUp, User, LogOut,
@@ -529,6 +530,7 @@ export default function App() {
         name: meta.storeName || "Mi lonja",
         ownerName: meta.ownerName || "",
         ownerUserId: authedUser.id,
+        email: authedUser.email,
         location: meta.location || "",
         rating: 0,
         since: new Date().getFullYear(),
@@ -546,6 +548,8 @@ export default function App() {
         throw new Error("No se pudo completar el alta de tu lonja. Contacta con nosotros.");
       }
       setVendors((prev) => [...prev, vendor]);
+      const adminEmail = import.meta.env.VITE_ADMIN_NOTIFY_EMAIL;
+      if (adminEmail) sendEmail({ to: adminEmail, ...buildAdminNewVendorEmail(vendor) });
     }
     setUser({ name: vendor.name, role: "vendedor", vendorId: vendor.id });
     showToast(`Sesión iniciada como ${vendor.name}`);
@@ -654,6 +658,18 @@ export default function App() {
     setPoints(nextPoints);
     await savePersonal("lonja:points", nextPoints);
     setLastOrder(order);
+
+    // Notificaciones por email: al comprador (confirmación) y a cada
+    // vendedor implicado (solo con sus propias líneas del pedido).
+    sendEmail({ to: shippingAddress.email, ...buildOrderConfirmationEmail(order) });
+    const vendorIdsInOrder = [...new Set(order.lines.map((l) => l.vendorId))];
+    for (const vId of vendorIdsInOrder) {
+      const v = vendors.find((x) => x.id === vId);
+      if (!v?.email) continue;
+      const vendorLines = order.lines.filter((l) => l.vendorId === vId);
+      sendEmail({ to: v.email, ...buildVendorNewOrderEmail(order, vendorLines, v.name) });
+    }
+
     goTo("confirm", {});
     return order;
   };
@@ -1455,14 +1471,14 @@ function CartView({ lines, updateQty, removeFromCart, total, goTo }) {
 /* ------------------------------------------------------------------ */
 
 function CheckoutView({ lines, total, user, placeOrder, goTo }) {
-  const [form, setForm] = useState({ name: user?.role === "comprador" ? user?.name || "" : "", address: "", city: "", postal: "", payment: "tarjeta", ageRange: "" });
+  const [form, setForm] = useState({ name: user?.role === "comprador" ? user?.name || "" : "", email: "", address: "", city: "", postal: "", payment: "tarjeta", ageRange: "" });
   const [submitting, setSubmitting] = useState(false);
   const [payError, setPayError] = useState("");
   const weightKg = cartWeightKg(lines);
   const shipping = shippingCostForWeight(weightKg);
   const grandTotal = total + shipping;
 
-  const canSubmit = form.name && form.address && form.city && form.postal;
+  const canSubmit = form.name && form.email.includes("@") && form.address && form.city && form.postal;
 
   return (
     <div className="grid grid-cols-1 gap-8 lg:grid-cols-3">
@@ -1472,6 +1488,7 @@ function CheckoutView({ lines, total, user, placeOrder, goTo }) {
           <h2 className="mb-3 text-sm font-semibold">Dirección de entrega</h2>
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <input placeholder="Nombre completo" value={form.name} onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} className="rounded border px-3 py-2 text-sm sm:col-span-2" style={{ borderColor: "#D9CBB3" }} />
+            <input type="email" placeholder="Email (para la confirmación del pedido)" value={form.email} onChange={(e) => setForm((f) => ({ ...f, email: e.target.value }))} className="rounded border px-3 py-2 text-sm sm:col-span-2" style={{ borderColor: "#D9CBB3" }} />
             <input placeholder="Dirección" value={form.address} onChange={(e) => setForm((f) => ({ ...f, address: e.target.value }))} className="rounded border px-3 py-2 text-sm sm:col-span-2" style={{ borderColor: "#D9CBB3" }} />
             <input placeholder="Ciudad" value={form.city} onChange={(e) => setForm((f) => ({ ...f, city: e.target.value }))} className="rounded border px-3 py-2 text-sm" style={{ borderColor: "#D9CBB3" }} />
             <input placeholder="Código postal" value={form.postal} onChange={(e) => setForm((f) => ({ ...f, postal: e.target.value }))} className="rounded border px-3 py-2 text-sm" style={{ borderColor: "#D9CBB3" }} />
