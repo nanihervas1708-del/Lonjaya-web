@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import { storage, uploadProductImage } from "./lib/storage";
 import { trackPageView, trackProductView, trackSearch, trackHeartbeat, fetchAnalyticsSummary } from "./lib/analytics";
-import { signInAdmin, signOutAdmin, getAdminSession, onAdminAuthChange } from "./lib/auth";
+import { signIn, signUpVendor, signOut, getAuthSession, onAuthChange, isVendorAccount } from "./lib/auth";
 import {
   ShoppingCart, Search, X, Star, Plus, Minus, Trash2, ChevronRight, ChevronDown,
   ChevronLeft, Anchor, Store, Package, TrendingUp, User, LogOut,
@@ -357,6 +357,7 @@ export default function App() {
   const [orders, setOrders] = useState([]);
   const [cart, setCart] = useState([]);
   const [user, setUser] = useState(null);
+  const [authUser, setAuthUser] = useState(null); // sesión cruda de Supabase Auth (admin o vendedor)
   const [points, setPoints] = useState(0);
   const [lastOrder, setLastOrder] = useState(null);
 
@@ -397,25 +398,18 @@ export default function App() {
       let u = await loadPersonal("lonja:user", null);
       let pts = await loadPersonal("lonja:points", 0);
 
-      // El admin nunca se restaura desde el almacenamiento "demo": se comprueba
-      // la sesión real de Supabase Auth. Si había una sesión de comprador/vendedor
-      // guardada pero resulta que era rol admin, se ignora (ya no es válida).
-      if (u?.role === "admin") u = null;
-      const adminUser = await getAdminSession();
-      if (adminUser) u = { name: adminUser.email, role: "admin", vendorId: null };
+      // Admin y vendedor nunca se restauran desde el almacenamiento "demo":
+      // dependen de la sesión real de Supabase Auth (ver useEffect de abajo).
+      if (u?.role === "admin" || u?.role === "vendedor") u = null;
+      const sessionUser = await getAuthSession();
+      setAuthUser(sessionUser);
 
       setProducts(p); setVendors(v); setOrders(o); setCart(c); setUser(u); setPoints(pts);
       setReady(true);
       trackPageView("home");
     })();
 
-    const unsubscribe = onAdminAuthChange((adminUser) => {
-      if (adminUser) {
-        setUser({ name: adminUser.email, role: "admin", vendorId: null });
-      } else {
-        setUser((prev) => (prev?.role === "admin" ? null : prev));
-      }
-    });
+    const unsubscribe = onAuthChange(setAuthUser);
 
     // "Latido" cada 20s mientras la pestaña está activa, para poder calcular
     // el tiempo medio de visita en el panel de admin sin depender de un
@@ -429,6 +423,21 @@ export default function App() {
       clearInterval(heartbeat);
     };
   }, []);
+
+  // Traduce la sesión cruda de Supabase Auth (authUser) al usuario de la app:
+  // admin, o vendedor (buscando qué lonja tiene ese id de cuenta como dueña).
+  useEffect(() => {
+    if (!authUser) {
+      setUser((prev) => (prev?.role === "admin" || prev?.role === "vendedor" ? null : prev));
+      return;
+    }
+    if (isVendorAccount(authUser)) {
+      const vendor = vendors.find((v) => v.ownerUserId === authUser.id);
+      setUser(vendor ? { name: vendor.name, role: "vendedor", vendorId: vendor.id } : null);
+    } else {
+      setUser({ name: authUser.email, role: "admin", vendorId: null });
+    }
+  }, [authUser, vendors]);
 
   const showToast = useCallback((msg) => {
     setToast(msg);
@@ -482,25 +491,41 @@ export default function App() {
   const cartCount = useMemo(() => cart.reduce((s, i) => s + i.qty, 0), [cart]);
 
   /* -------- auth -------- */
-  // Comprador / vendedor: acceso de demostración, sin contraseña.
-  const login = async (name, role, vendorId) => {
-    const u = { name, role, vendorId: vendorId || null };
+  // Comprador: acceso de demostración, sin contraseña.
+  const login = async (name) => {
+    const u = { name, role: "comprador", vendorId: null };
     setUser(u);
     await savePersonal("lonja:user", u);
-    showToast(`Sesión iniciada como ${role === "vendedor" ? "vendedor" : "comprador"}`);
-    goTo(role === "vendedor" ? "vendor-dash" : "home");
+    showToast("Sesión iniciada como comprador");
+    goTo("home");
   };
 
-  // Admin: acceso real con email + contraseña vía Supabase Auth.
+  // Admin y vendedor: acceso real con email + contraseña vía Supabase Auth.
+  // Tras el signIn, el useEffect que escucha authUser resuelve el rol y
+  // rellena "user" automáticamente — aquí solo hace falta esperar y navegar.
   const loginAdmin = async (email, password) => {
-    const adminUser = await signInAdmin(email, password); // lanza error si falla
-    setUser({ name: adminUser.email, role: "admin", vendorId: null });
+    await signIn(email, password); // lanza error si falla
     showToast("Sesión iniciada como administrador");
     goTo("admin");
   };
 
+  const loginVendor = async (email, password) => {
+    const authedUser = await signIn(email, password); // lanza error si falla
+    if (!isVendorAccount(authedUser)) {
+      await signOut();
+      throw new Error("Esta cuenta no es de vendedor.");
+    }
+    const vendor = vendors.find((v) => v.ownerUserId === authedUser.id);
+    if (!vendor) {
+      await signOut();
+      throw new Error("No hay ninguna lonja asociada todavía a esta cuenta.");
+    }
+    showToast(`Sesión iniciada como ${vendor.name}`);
+    goTo("vendor-dash");
+  };
+
   const logout = async () => {
-    if (user?.role === "admin") await signOutAdmin();
+    if (user?.role === "admin" || user?.role === "vendedor") await signOut();
     setUser(null);
     await savePersonal("lonja:user", null);
     goTo("home");
@@ -548,10 +573,13 @@ export default function App() {
     });
   };
   /* Seller self sign-up: creates a pending vendor and logs the user in as its owner */
-  const registerSeller = async ({ storeName, location, specialty, bio, ownerName, vendorType }) => {
+  const registerSeller = async ({ storeName, location, specialty, bio, ownerName, vendorType, email, password }) => {
+    const authedUser = await signUpVendor(email, password); // lanza error si el email ya existe, etc.
     const vendor = {
       id: "v" + Date.now(),
       name: storeName,
+      ownerName,
+      ownerUserId: authedUser.id,
       location,
       rating: 0,
       since: new Date().getFullYear(),
@@ -567,8 +595,8 @@ export default function App() {
       saveShared("lonja:vendors", next);
       return next;
     });
-    await login(ownerName, "vendedor", vendor.id);
-    showToast("Solicitud enviada. Un administrador la revisará en breve.");
+    // No hay sesión activa todavía si el proyecto exige confirmar el email
+    // (es el caso de LonjaYa): el propio SellerSignupView avisa de este paso.
   };
 
   /* -------- checkout -------- */
@@ -819,7 +847,7 @@ export default function App() {
           <CheckoutView lines={cartLines} total={cartTotal} user={user} placeOrder={placeOrder} goTo={goTo} />
         )}
         {view === "confirm" && <ConfirmView goTo={goTo} order={lastOrder} totalPoints={points} />}
-        {view === "login" && <LoginView login={login} loginAdmin={loginAdmin} vendors={vendors} goTo={goTo} />}
+        {view === "login" && <LoginView login={login} loginAdmin={loginAdmin} loginVendor={loginVendor} goTo={goTo} />}
         {view === "vendor-dash" && user?.role === "vendedor" && (
           <VendorDashboard
             vendor={vendorOf(user.vendorId)}
@@ -1637,23 +1665,27 @@ function ConfirmView({ goTo, order, totalPoints }) {
 /*  LOGIN (demo)                                                        */
 /* ------------------------------------------------------------------ */
 
-function LoginView({ login, loginAdmin, vendors, goTo }) {
+function LoginView({ login, loginAdmin, loginVendor, goTo }) {
   const [name, setName] = useState("");
   const [role, setRole] = useState("comprador");
-  const [vendorId, setVendorId] = useState(vendors[0]?.id || "");
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [adminError, setAdminError] = useState("");
+  const [authError, setAuthError] = useState("");
   const [submitting, setSubmitting] = useState(false);
 
-  const submitAdmin = async () => {
-    setAdminError("");
+  const submitAuth = async () => {
+    setAuthError("");
     setSubmitting(true);
     try {
-      await loginAdmin(email.trim(), password);
+      if (role === "admin") await loginAdmin(email.trim(), password);
+      else await loginVendor(email.trim(), password);
     } catch (err) {
-      setAdminError("Email o contraseña incorrectos.");
+      setAuthError(
+        err?.message?.includes("asociada") || err?.message?.includes("no es de vendedor")
+          ? err.message
+          : "Email o contraseña incorrectos, o el email todavía no está confirmado."
+      );
     } finally {
       setSubmitting(false);
     }
@@ -1663,7 +1695,7 @@ function LoginView({ login, loginAdmin, vendors, goTo }) {
     <div className="mx-auto max-w-sm py-10">
       <h1 className="mb-1 text-xl font-semibold" style={{ fontFamily: "'Fraunces', serif" }}>Acceder a LonjaYa</h1>
       <p className="mb-6 text-xs" style={{ color: "#5C6B6E" }}>
-        Comprador y vendedor son accesos de demostración. El acceso de administrador es real y requiere contraseña.
+        Comprador es un acceso rápido de invitado. Vendedor y administrador requieren cuenta con contraseña.
       </p>
 
       <label className="mb-1 block text-xs font-medium">Entrar como</label>
@@ -1671,7 +1703,7 @@ function LoginView({ login, loginAdmin, vendors, goTo }) {
         {[{ id: "comprador", label: "Comprador", icon: User }, { id: "vendedor", label: "Vendedor", icon: Store }, { id: "admin", label: "Admin", icon: ShieldCheck }].map((r) => (
           <button
             key={r.id}
-            onClick={() => setRole(r.id)}
+            onClick={() => { setRole(r.id); setAuthError(""); }}
             className="flex flex-col items-center gap-1 rounded-md border py-2.5 text-xs font-medium"
             style={{ borderColor: role === r.id ? "#0E3A45" : "#D9CBB3", backgroundColor: role === r.id ? "#0E3A45" : "white", color: role === r.id ? "white" : "#16242A" }}
           >
@@ -1680,55 +1712,52 @@ function LoginView({ login, loginAdmin, vendors, goTo }) {
         ))}
       </div>
 
-      {role === "admin" ? (
+      {role === "comprador" ? (
+        <>
+          <label className="mb-1 block text-xs font-medium">Tu nombre</label>
+          <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Ej. Marta García" className="mb-4 w-full rounded border px-3 py-2 text-sm" style={{ borderColor: "#D9CBB3" }} />
+          <button
+            disabled={!name.trim()}
+            onClick={() => login(name.trim())}
+            className="w-full rounded-md py-2.5 text-sm font-semibold text-white disabled:opacity-40"
+            style={{ backgroundColor: "#E85D42" }}
+          >
+            Entrar
+          </button>
+        </>
+      ) : (
         <>
           <label className="mb-1 block text-xs font-medium">Email</label>
           <input
             type="email" value={email} onChange={(e) => setEmail(e.target.value)}
-            placeholder="admin@lonjaya.com" autoComplete="username"
+            placeholder={role === "admin" ? "admin@lonjaya.com" : "tu@lonja.com"} autoComplete="username"
             className="mb-3 w-full rounded border px-3 py-2 text-sm" style={{ borderColor: "#D9CBB3" }}
           />
           <label className="mb-1 block text-xs font-medium">Contraseña</label>
           <input
             type="password" value={password} onChange={(e) => setPassword(e.target.value)}
             placeholder="••••••••" autoComplete="current-password"
-            onKeyDown={(e) => e.key === "Enter" && email.trim() && password && submitAdmin()}
+            onKeyDown={(e) => e.key === "Enter" && email.trim() && password && submitAuth()}
             className="mb-1 w-full rounded border px-3 py-2 text-sm" style={{ borderColor: "#D9CBB3" }}
           />
-          {adminError && <p className="mb-2 text-xs font-medium" style={{ color: "#B04A2F" }}>{adminError}</p>}
-          <p className="mb-4 mt-1 text-[11px]" style={{ color: "#5C6B6E" }}>
-            Este usuario se crea manualmente desde el panel de Supabase — no hay alta pública para administradores.
-          </p>
+          {authError && <p className="mb-2 text-xs font-medium" style={{ color: "#B04A2F" }}>{authError}</p>}
+          {role === "admin" ? (
+            <p className="mb-4 mt-1 text-[11px]" style={{ color: "#5C6B6E" }}>
+              Este usuario se crea manualmente desde el panel de Supabase — no hay alta pública para administradores.
+            </p>
+          ) : (
+            <p className="mb-4 mt-1 text-[11px]" style={{ color: "#5C6B6E" }}>
+              ¿Todavía no tienes cuenta de vendedor?{" "}
+              <button onClick={() => goTo("sell")} className="underline" style={{ color: "#2F6B5E" }}>Date de alta aquí</button>.
+            </p>
+          )}
           <button
             disabled={!email.trim() || !password || submitting}
-            onClick={submitAdmin}
+            onClick={submitAuth}
             className="w-full rounded-md py-2.5 text-sm font-semibold text-white disabled:opacity-40"
             style={{ backgroundColor: "#E85D42" }}
           >
-            {submitting ? "Comprobando…" : "Entrar como administrador"}
-          </button>
-        </>
-      ) : (
-        <>
-          <label className="mb-1 block text-xs font-medium">Tu nombre</label>
-          <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Ej. Marta García" className="mb-4 w-full rounded border px-3 py-2 text-sm" style={{ borderColor: "#D9CBB3" }} />
-
-          {role === "vendedor" && (
-            <>
-              <label className="mb-1 block text-xs font-medium">Tu pescadería / lonja</label>
-              <select value={vendorId} onChange={(e) => setVendorId(e.target.value)} className="mb-4 w-full rounded border px-3 py-2 text-sm" style={{ borderColor: "#D9CBB3" }}>
-                {vendors.map((v) => <option key={v.id} value={v.id}>{v.name}</option>)}
-              </select>
-            </>
-          )}
-
-          <button
-            disabled={!name.trim()}
-            onClick={() => login(name.trim(), role, vendorId)}
-            className="w-full rounded-md py-2.5 text-sm font-semibold text-white disabled:opacity-40"
-            style={{ backgroundColor: "#E85D42" }}
-          >
-            Entrar
+            {submitting ? "Comprobando…" : role === "admin" ? "Entrar como administrador" : "Entrar como vendedor"}
           </button>
         </>
       )}
@@ -1742,15 +1771,49 @@ function LoginView({ login, loginAdmin, vendors, goTo }) {
 /* ------------------------------------------------------------------ */
 
 function SellerSignupView({ registerSeller, categories, goTo }) {
-  const [form, setForm] = useState({ ownerName: "", storeName: "", location: "", specialty: categories[0].id, bio: "", vendorType: "pescaderia" });
+  const [form, setForm] = useState({ ownerName: "", storeName: "", location: "", specialty: categories[0].id, bio: "", vendorType: "pescaderia", email: "", password: "", password2: "" });
   const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState("");
+  const [done, setDone] = useState(false);
   const [kg, setKg] = useState(120);
   const [avgPrice, setAvgPrice] = useState(20);
-  const canSubmit = form.ownerName && form.storeName && form.location;
+
+  const passwordsOk = form.password.length >= 6 && form.password === form.password2;
+  const canSubmit = form.ownerName && form.storeName && form.location && form.email.trim() && passwordsOk;
 
   const gross = kg * avgPrice;
   const commission = gross * DEFAULT_COMMISSION;
   const net = gross - commission;
+
+  const submit = async () => {
+    setError("");
+    setSubmitting(true);
+    try {
+      await registerSeller(form);
+      setDone(true);
+    } catch (err) {
+      setError(err?.message?.includes("already registered") ? "Ese email ya tiene una cuenta. Prueba a iniciar sesión." : "No se pudo completar el registro. Revisa los datos e inténtalo de nuevo.");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  if (done) {
+    return (
+      <div className="mx-auto flex max-w-sm flex-col items-center gap-3 py-20 text-center">
+        <div className="flex h-16 w-16 items-center justify-center rounded-full" style={{ backgroundColor: "#2F6B5E1A" }}>
+          <Check size={30} color="#2F6B5E" />
+        </div>
+        <h2 className="text-xl font-semibold" style={{ fontFamily: "'Fraunces', serif" }}>¡Ya casi está!</h2>
+        <p className="text-sm" style={{ color: "#5C6B6E" }}>
+          Te hemos enviado un correo a <strong>{form.email}</strong> para confirmar tu cuenta. Confírmalo y después ya podrás iniciar sesión como vendedor — un administrador revisará tu alta antes de que tus productos sean visibles en la tienda.
+        </p>
+        <button onClick={() => goTo("home")} className="mt-2 rounded-md px-4 py-2 text-sm font-semibold text-white" style={{ backgroundColor: "#0E3A45" }}>
+          Volver al inicio
+        </button>
+      </div>
+    );
+  }
 
   return (
     <div className="mx-auto max-w-3xl py-6">
@@ -1839,10 +1902,32 @@ function SellerSignupView({ registerSeller, categories, goTo }) {
               {categories.map((c) => <option key={c.id} value={c.id}>{c.emoji} {c.name}</option>)}
             </select>
             <textarea placeholder="Cuéntanos qué vendes y de dónde viene tu captura" value={form.bio} onChange={(e) => setForm((f) => ({ ...f, bio: e.target.value }))} rows={3} className="rounded border px-3 py-2 text-sm" style={{ borderColor: "#D9CBB3" }} />
+
+            <div className="mt-2 border-t pt-3" style={{ borderColor: "#E4D9C4" }}>
+              <p className="mb-2 text-xs font-semibold">Tu cuenta de acceso</p>
+              <input
+                type="email" placeholder="Email" value={form.email} onChange={(e) => setForm((f) => ({ ...f, email: e.target.value }))}
+                className="mb-2 w-full rounded border px-3 py-2 text-sm" style={{ borderColor: "#D9CBB3" }}
+              />
+              <div className="grid grid-cols-2 gap-2">
+                <input
+                  type="password" placeholder="Contraseña (mín. 6)" value={form.password} onChange={(e) => setForm((f) => ({ ...f, password: e.target.value }))}
+                  className="rounded border px-3 py-2 text-sm" style={{ borderColor: "#D9CBB3" }}
+                />
+                <input
+                  type="password" placeholder="Repite la contraseña" value={form.password2} onChange={(e) => setForm((f) => ({ ...f, password2: e.target.value }))}
+                  className="rounded border px-3 py-2 text-sm" style={{ borderColor: form.password2 && !passwordsOk ? "#B04A2F" : "#D9CBB3" }}
+                />
+              </div>
+              {form.password2 && !passwordsOk && (
+                <p className="mt-1 text-[11px]" style={{ color: "#B04A2F" }}>Las contraseñas no coinciden o son demasiado cortas (mínimo 6 caracteres).</p>
+              )}
+            </div>
           </div>
+          {error && <p className="mt-3 text-xs font-medium" style={{ color: "#B04A2F" }}>{error}</p>}
           <button
             disabled={!canSubmit || submitting}
-            onClick={async () => { setSubmitting(true); await registerSeller(form); }}
+            onClick={submit}
             className="mt-4 w-full rounded-md py-2.5 text-sm font-semibold text-white disabled:opacity-40"
             style={{ backgroundColor: "#E85D42" }}
           >
@@ -2401,6 +2486,9 @@ function NewVendorModal({ onClose, onSave }) {
           <h3 className="font-semibold" style={{ fontFamily: "'Fraunces', serif" }}>Nuevo vendedor</h3>
           <button onClick={onClose}><X size={18} /></button>
         </div>
+        <p className="mb-3 rounded-md border p-2 text-[11px]" style={{ borderColor: "#B08900", backgroundColor: "#B0890010", color: "#8A6A00" }}>
+          Aviso: dar de alta un vendedor aquí NO le crea una cuenta con la que iniciar sesión — solo pueden entrar los vendedores que se registran ellos mismos desde "Vender en LonjaYa". Úsalo solo para catálogo de ejemplo o casos especiales.
+        </p>
         <div className="mb-3 grid grid-cols-3 gap-2">
           {VENDOR_TYPES.map((t) => (
             <button
