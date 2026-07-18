@@ -2,6 +2,7 @@ import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import { storage, uploadProductImage } from "./lib/storage";
 import { trackPageView, trackProductView, trackSearch, trackHeartbeat, fetchAnalyticsSummary } from "./lib/analytics";
 import { signIn, signUpVendor, signOut, getAuthSession, onAuthChange, isVendorAccount } from "./lib/auth";
+import { fetchVendors, fetchProducts, upsertVendorRow, bulkInsertVendors, upsertProductRow, bulkInsertProducts, deleteProductRow } from "./lib/marketplace";
 import {
   ShoppingCart, Search, X, Star, Plus, Minus, Trash2, ChevronRight, ChevronDown,
   ChevronLeft, Anchor, Store, Package, TrendingUp, User, LogOut,
@@ -373,26 +374,28 @@ export default function App() {
   /* -------- init -------- */
   useEffect(() => {
     (async () => {
-      let v = await loadShared("lonja:vendors", null);
-      if (!v) {
-        v = VENDOR_SEED;
-      } else {
-        const knownIds = new Set(v.map((x) => x.id));
-        const missing = VENDOR_SEED.filter((x) => !knownIds.has(x.id));
-        if (missing.length) v = [...v, ...missing];
-      }
-      v = v.map((x) => ({ commissionRate: DEFAULT_COMMISSION, verified: true, status: "activo", vendorType: "pescaderia", ...x }));
-      await saveShared("lonja:vendors", v);
+      let v = await fetchVendors();
+      let p = await fetchProducts();
 
-      let p = await loadShared("lonja:products", null);
-      if (!p) {
-        p = PRODUCT_SEED;
-      } else {
-        const knownIds = new Set(p.map((x) => x.id));
-        const missing = PRODUCT_SEED.filter((x) => !knownIds.has(x.id));
-        if (missing.length) p = [...p, ...missing];
+      // Migración única: si las tablas nuevas están vacías, se intenta traer
+      // lo que hubiera en el almacenamiento antiguo (por si ya habías editado
+      // o borrado vendedores de ejemplo) en vez de resembrar los datos de
+      // fábrica desde cero. Si tampoco había nada ahí, se siembra el catálogo
+      // de ejemplo de siempre.
+      if (v.length === 0) {
+        let oldVendors = await loadShared("lonja:vendors", []);
+        if (oldVendors.length === 0) oldVendors = VENDOR_SEED;
+        oldVendors = oldVendors.map((x) => ({ commissionRate: DEFAULT_COMMISSION, verified: true, status: "activo", vendorType: "pescaderia", ...x }));
+        await bulkInsertVendors(oldVendors);
+        v = oldVendors;
       }
-      await saveShared("lonja:products", p);
+      if (p.length === 0) {
+        let oldProducts = await loadShared("lonja:products", []);
+        if (oldProducts.length === 0) oldProducts = PRODUCT_SEED;
+        await bulkInsertProducts(oldProducts);
+        p = oldProducts;
+      }
+
       let o = await loadShared("lonja:orders", []);
       let c = await loadPersonal("lonja:cart", []);
       let u = await loadPersonal("lonja:user", null);
@@ -515,11 +518,36 @@ export default function App() {
       await signOut();
       throw new Error("Esta cuenta no es de vendedor.");
     }
-    const vendor = vendors.find((v) => v.ownerUserId === authedUser.id);
+    let vendor = vendors.find((v) => v.ownerUserId === authedUser.id);
     if (!vendor) {
-      await signOut();
-      throw new Error("No hay ninguna lonja asociada todavía a esta cuenta.");
+      // Primer inicio de sesión tras confirmar el email: ahora sí está
+      // autenticado, así que la política de seguridad permite crear su
+      // ficha de vendedor (antes, justo tras el registro, no se podía).
+      const meta = authedUser.user_metadata || {};
+      vendor = {
+        id: "v" + Date.now(),
+        name: meta.storeName || "Mi lonja",
+        ownerName: meta.ownerName || "",
+        ownerUserId: authedUser.id,
+        location: meta.location || "",
+        rating: 0,
+        since: new Date().getFullYear(),
+        specialty: meta.specialty || CATEGORIES[0].id,
+        bio: meta.bio || "",
+        status: "pendiente",
+        commissionRate: DEFAULT_COMMISSION,
+        verified: false,
+        vendorType: meta.vendorType || "pescaderia",
+      };
+      try {
+        await upsertVendorRow(vendor);
+      } catch (err) {
+        await signOut();
+        throw new Error("No se pudo completar el alta de tu lonja. Contacta con nosotros.");
+      }
+      setVendors((prev) => [...prev, vendor]);
     }
+    setUser({ name: vendor.name, role: "vendedor", vendorId: vendor.id });
     showToast(`Sesión iniciada como ${vendor.name}`);
     goTo("vendor-dash");
   };
@@ -531,72 +559,66 @@ export default function App() {
     goTo("home");
   };
 
-  /* -------- vendor product CRUD -------- */
+  /* -------- vendor product CRUD (tabla real, protegida por RLS) -------- */
   const upsertProduct = async (prod) => {
-    setProducts((prev) => {
-      const exists = prev.some((p) => p.id === prod.id);
-      const next = exists ? prev.map((p) => (p.id === prod.id ? prod : p)) : [...prev, prod];
-      saveShared("lonja:products", next);
-      return next;
-    });
-    showToast("Producto guardado");
+    try {
+      await upsertProductRow(prod);
+      setProducts((prev) => {
+        const exists = prev.some((p) => p.id === prod.id);
+        return exists ? prev.map((p) => (p.id === prod.id ? prod : p)) : [...prev, prod];
+      });
+      showToast("Producto guardado");
+    } catch (err) {
+      showToast("No se pudo guardar el producto");
+    }
   };
   const deleteProduct = async (id) => {
-    setProducts((prev) => {
-      const next = prev.filter((p) => p.id !== id);
-      saveShared("lonja:products", next);
-      return next;
-    });
+    try {
+      await deleteProductRow(id);
+      setProducts((prev) => prev.filter((p) => p.id !== id));
+    } catch (err) {
+      showToast("No se pudo borrar el producto");
+    }
   };
 
-  /* -------- vendor admin ops -------- */
+  /* -------- vendor admin ops (tabla real, protegida por RLS: solo el admin puede tocar esto) -------- */
   const setVendorStatus = async (id, status) => {
-    setVendors((prev) => {
-      const next = prev.map((v) => (v.id === id ? { ...v, status } : v));
-      saveShared("lonja:vendors", next);
-      return next;
-    });
-    showToast(status === "activo" ? "Vendedor aprobado" : status === "suspendido" ? "Vendedor suspendido" : "Solicitud rechazada");
+    const vendor = vendors.find((v) => v.id === id);
+    if (!vendor) return;
+    try {
+      await upsertVendorRow({ ...vendor, status });
+      setVendors((prev) => prev.map((v) => (v.id === id ? { ...v, status } : v)));
+      showToast(status === "activo" ? "Vendedor aprobado" : status === "suspendido" ? "Vendedor suspendido" : "Solicitud rechazada");
+    } catch (err) {
+      showToast("No se pudo actualizar el estado del vendedor");
+    }
   };
   const setVendorCommission = async (id, commissionRate) => {
-    setVendors((prev) => {
-      const next = prev.map((v) => (v.id === id ? { ...v, commissionRate } : v));
-      saveShared("lonja:vendors", next);
-      return next;
-    });
+    const vendor = vendors.find((v) => v.id === id);
+    if (!vendor) return;
+    try {
+      await upsertVendorRow({ ...vendor, commissionRate });
+      setVendors((prev) => prev.map((v) => (v.id === id ? { ...v, commissionRate } : v)));
+    } catch (err) {
+      showToast("No se pudo actualizar la comisión");
+    }
   };
   const addVendor = async (vendor) => {
-    setVendors((prev) => {
-      const next = [...prev, vendor];
-      saveShared("lonja:vendors", next);
-      return next;
-    });
+    try {
+      await upsertVendorRow(vendor);
+      setVendors((prev) => [...prev, vendor]);
+    } catch (err) {
+      showToast("No se pudo crear el vendedor");
+    }
   };
-  /* Seller self sign-up: creates a pending vendor and logs the user in as its owner */
+
+  /* Alta de vendedor: solo crea la cuenta de acceso (email + contraseña).
+   * La ficha de la lonja se crea más adelante, en el primer inicio de
+   * sesión ya confirmado (ver loginVendor) — justo después de registrarse
+   * todavía no hay sesión activa (falta confirmar el email) y las políticas
+   * de seguridad no permitirían crear la fila sin estar autenticado. */
   const registerSeller = async ({ storeName, location, specialty, bio, ownerName, vendorType, email, password }) => {
-    const authedUser = await signUpVendor(email, password); // lanza error si el email ya existe, etc.
-    const vendor = {
-      id: "v" + Date.now(),
-      name: storeName,
-      ownerName,
-      ownerUserId: authedUser.id,
-      location,
-      rating: 0,
-      since: new Date().getFullYear(),
-      specialty,
-      bio,
-      status: "pendiente",
-      commissionRate: DEFAULT_COMMISSION,
-      verified: false,
-      vendorType: vendorType || "pescaderia",
-    };
-    setVendors((prev) => {
-      const next = [...prev, vendor];
-      saveShared("lonja:vendors", next);
-      return next;
-    });
-    // No hay sesión activa todavía si el proyecto exige confirmar el email
-    // (es el caso de LonjaYa): el propio SellerSignupView avisa de este paso.
+    await signUpVendor(email, password, { storeName, ownerName, location, specialty, bio, vendorType });
   };
 
   /* -------- checkout -------- */

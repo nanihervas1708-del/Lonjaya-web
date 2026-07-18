@@ -20,15 +20,17 @@ export async function signIn(email, password) {
 }
 
 /** Crea una cuenta nueva de vendedor. Requiere confirmar el email antes de poder entrar
- * (así está configurado el proyecto de Supabase), así que no devuelve sesión activa. */
-export async function signUpVendor(email, password) {
+ * (así está configurado el proyecto de Supabase), así que no devuelve sesión activa.
+ * Los datos de la tienda (nombre, ubicación...) se guardan en los metadatos de la
+ * cuenta y se usan para crear la ficha real de vendedor en el primer login. */
+export async function signUpVendor(email, password, profile = {}) {
   const { data, error } = await supabase.auth.signUp({
     email,
     password,
-    options: { data: { role: "vendedor" } },
+    options: { data: { role: "vendedor", ...profile } },
   });
   if (error) throw error;
-  return data.user; // puede no tener sesión activa todavía si hace falta confirmar el email
+  return data.user;
 }
 
 export async function signOut() {
