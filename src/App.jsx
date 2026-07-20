@@ -3,13 +3,15 @@ import { storage, uploadProductImage } from "./lib/storage";
 import { trackPageView, trackProductView, trackSearch, trackHeartbeat, fetchAnalyticsSummary } from "./lib/analytics";
 import { signIn, signUpVendor, signOut, getAuthSession, onAuthChange, isVendorAccount } from "./lib/auth";
 import { fetchVendors, fetchProducts, upsertVendorRow, bulkInsertVendors, upsertProductRow, bulkInsertProducts, deleteProductRow } from "./lib/marketplace";
-import { sendEmail, buildOrderConfirmationEmail, buildVendorNewOrderEmail, buildAdminNewVendorEmail } from "./lib/emails";
+import { sendEmail, sendAdminNotification, buildOrderConfirmationEmail, buildVendorNewOrderEmail, buildAdminNewVendorEmail } from "./lib/emails";
+import { marked } from "marked";
+import { LEGAL_DOCS } from "./lib/legalContent";
 import {
   ShoppingCart, Search, X, Star, Plus, Minus, Trash2, ChevronRight, ChevronDown,
   ChevronLeft, Anchor, Store, Package, TrendingUp, User, LogOut,
   Check, MapPin, Clock, SlidersHorizontal, ArrowLeft, ShieldCheck,
   PlusCircle, Pencil, BarChart3, Users, Waves, Snowflake, Sun,
-  Building2, Globe, ImagePlus
+  Building2, Globe, ImagePlus, Mail
 } from "lucide-react";
 
 /* ------------------------------------------------------------------ */
@@ -548,8 +550,7 @@ export default function App() {
         throw new Error("No se pudo completar el alta de tu lonja. Contacta con nosotros.");
       }
       setVendors((prev) => [...prev, vendor]);
-      const adminEmail = import.meta.env.VITE_ADMIN_NOTIFY_EMAIL;
-      if (adminEmail) sendEmail({ to: adminEmail, ...buildAdminNewVendorEmail(vendor) });
+      sendAdminNotification(buildAdminNewVendorEmail(vendor));
     }
     setUser({ name: vendor.name, role: "vendedor", vendorId: vendor.id });
     showToast(`Sesión iniciada como ${vendor.name}`);
@@ -885,6 +886,8 @@ export default function App() {
           <CheckoutView lines={cartLines} total={cartTotal} user={user} placeOrder={placeOrder} goTo={goTo} />
         )}
         {view === "confirm" && <ConfirmView goTo={goTo} order={lastOrder} totalPoints={points} />}
+        {view.startsWith("legal-") && <LegalPageView docId={view.replace("legal-", "")} goTo={goTo} />}
+        {view === "contacto" && <ContactFormView goTo={goTo} />}
         {view === "login" && <LoginView login={login} loginAdmin={loginAdmin} loginVendor={loginVendor} goTo={goTo} />}
         {view === "vendor-dash" && user?.role === "vendedor" && (
           <VendorDashboard
@@ -918,6 +921,24 @@ export default function App() {
             LonjaYa — marketplace de pescado y marisco de lonja a mesa. Comisión transparente por venta, tú fijas tus precios.
             {" "}Logística en frío a cargo de {LOGISTICS_INFO.partnerName}. Prototipo de demostración.
           </p>
+          <div className="flex flex-wrap items-center justify-center gap-x-3 gap-y-1 text-[11px]" style={{ color: "#5C6B6E" }}>
+            {[
+              { id: "aviso", label: "Aviso legal" },
+              { id: "privacidad", label: "Privacidad" },
+              { id: "cookies", label: "Cookies" },
+              { id: "condiciones", label: "Condiciones de venta" },
+              { id: "devoluciones", label: "Devoluciones" },
+            ].map((l, i) => (
+              <span key={l.id} className="flex items-center gap-3">
+                {i > 0 && <span style={{ color: "#3A4649" }}>·</span>}
+                <button onClick={() => goTo(`legal-${l.id}`)} className="hover:underline">{l.label}</button>
+              </span>
+            ))}
+            <span className="flex items-center gap-3">
+              <span style={{ color: "#3A4649" }}>·</span>
+              <button onClick={() => goTo("contacto")} className="hover:underline">Contacto</button>
+            </span>
+          </div>
         </div>
       </footer>
 
@@ -1661,6 +1682,146 @@ function PayPalCheckoutButton({ amount, submitting, setSubmitting, onSuccess, on
         <p className="mb-2 text-xs font-medium" style={{ color: "#5C6B6E" }}>Procesando pago…</p>
       )}
       <div ref={containerRef} />
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  PÁGINAS LEGALES                                                     */
+/* ------------------------------------------------------------------ */
+
+function LegalPageView({ docId, goTo }) {
+  const doc = LEGAL_DOCS[docId];
+  if (!doc) {
+    return (
+      <div className="py-20 text-center text-sm" style={{ color: "#5C6B6E" }}>
+        Página no encontrada.
+      </div>
+    );
+  }
+  const html = useMemo(() => marked.parse(doc.markdown), [doc.markdown]);
+
+  const handleContentClick = (e) => {
+    const link = e.target.closest('a[href="#contacto"]');
+    if (link) {
+      e.preventDefault();
+      goTo("contacto");
+    }
+  };
+
+  return (
+    <div className="mx-auto max-w-2xl py-6">
+      <button onClick={() => goTo("home")} className="mb-4 flex items-center gap-1 text-xs font-medium" style={{ color: "#5C6B6E" }}>
+        <ArrowLeft size={14} /> Volver a LonjaYa
+      </button>
+      <div
+        className="legal-content rounded-lg border bg-white p-6 sm:p-8"
+        style={{ borderColor: "#E4D9C4" }}
+        onClick={handleContentClick}
+        dangerouslySetInnerHTML={{ __html: html }}
+      />
+      <button
+        onClick={() => goTo("contacto")}
+        className="mt-4 flex items-center gap-1.5 rounded-md px-4 py-2 text-xs font-semibold text-white"
+        style={{ backgroundColor: "#0E3A45" }}
+      >
+        <Mail size={14} /> Ir al formulario de contacto
+      </button>
+      <style>{`
+        .legal-content h1 { font-family:'Fraunces',serif; font-size:1.5rem; font-weight:600; color:#16242A; margin-bottom:1rem; }
+        .legal-content h2 { font-family:'Fraunces',serif; font-size:1.1rem; font-weight:600; color:#0E3A45; margin-top:1.75rem; margin-bottom:0.5rem; }
+        .legal-content p { font-size:0.875rem; line-height:1.6; color:#3A4649; margin-bottom:0.75rem; }
+        .legal-content ul { font-size:0.875rem; line-height:1.6; color:#3A4649; margin:0.5rem 0 0.75rem 1.25rem; list-style:disc; }
+        .legal-content li { margin-bottom:0.25rem; }
+        .legal-content strong { color:#16242A; }
+        .legal-content a { color:#2F6B5E; text-decoration:underline; cursor:pointer; }
+        .legal-content table { width:100%; border-collapse:collapse; font-size:0.8rem; margin:0.75rem 0; }
+        .legal-content th, .legal-content td { border:1px solid #E4D9C4; padding:6px 10px; text-align:left; }
+        .legal-content th { background:#F6F8F7; }
+        .legal-content hr { border:none; border-top:1px solid #E4D9C4; margin:1.5rem 0; }
+      `}</style>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  FORMULARIO DE CONTACTO / RECLAMACIONES                              */
+/* ------------------------------------------------------------------ */
+
+function ContactFormView({ goTo }) {
+  const [form, setForm] = useState({ name: "", email: "", orderId: "", subject: "", message: "" });
+  const [sending, setSending] = useState(false);
+  const [sent, setSent] = useState(false);
+  const [error, setError] = useState("");
+
+  const canSubmit = form.name.trim() && form.email.includes("@") && form.message.trim().length >= 5;
+
+  const submit = async () => {
+    setError("");
+    setSending(true);
+    try {
+      await sendAdminNotification({
+        subject: `Contacto/reclamación: ${form.subject || "sin asunto"} — ${form.name}`,
+        html: `
+          <div style="font-family:sans-serif;max-width:480px;margin:auto">
+            <h2 style="color:#0E3A45">Nuevo mensaje desde el formulario de contacto</h2>
+            <p><strong>De:</strong> ${form.name} (${form.email})</p>
+            ${form.orderId ? `<p><strong>Nº de pedido:</strong> ${form.orderId}</p>` : ""}
+            <p><strong>Asunto:</strong> ${form.subject || "—"}</p>
+            <p style="white-space:pre-wrap">${form.message}</p>
+          </div>`,
+      });
+      setSent(true);
+    } catch (err) {
+      setError("No se pudo enviar el mensaje. Inténtalo de nuevo en unos minutos.");
+    } finally {
+      setSending(false);
+    }
+  };
+
+  if (sent) {
+    return (
+      <div className="mx-auto flex max-w-sm flex-col items-center gap-3 py-20 text-center">
+        <div className="flex h-16 w-16 items-center justify-center rounded-full" style={{ backgroundColor: "#2F6B5E1A" }}>
+          <Check size={30} color="#2F6B5E" />
+        </div>
+        <h2 className="text-xl font-semibold" style={{ fontFamily: "'Fraunces', serif" }}>Mensaje enviado</h2>
+        <p className="text-sm" style={{ color: "#5C6B6E" }}>
+          Hemos recibido tu mensaje y te responderemos lo antes posible al email que nos has indicado.
+        </p>
+        <button onClick={() => goTo("home")} className="mt-2 rounded-md px-4 py-2 text-sm font-semibold text-white" style={{ backgroundColor: "#0E3A45" }}>
+          Volver al inicio
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="mx-auto max-w-md py-6">
+      <button onClick={() => goTo("home")} className="mb-4 flex items-center gap-1 text-xs font-medium" style={{ color: "#5C6B6E" }}>
+        <ArrowLeft size={14} /> Volver a LonjaYa
+      </button>
+      <h1 className="mb-1 text-xl font-semibold" style={{ fontFamily: "'Fraunces', serif" }}>Contacto y reclamaciones</h1>
+      <p className="mb-6 text-xs" style={{ color: "#5C6B6E" }}>
+        Escríbenos para cualquier duda, incidencia con un pedido, o reclamación. Te responderemos por email lo antes posible.
+      </p>
+
+      <div className="flex flex-col gap-3 rounded-lg border bg-white p-5" style={{ borderColor: "#E4D9C4" }}>
+        <input placeholder="Tu nombre" value={form.name} onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} className="rounded border px-3 py-2 text-sm" style={{ borderColor: "#D9CBB3" }} />
+        <input type="email" placeholder="Tu email" value={form.email} onChange={(e) => setForm((f) => ({ ...f, email: e.target.value }))} className="rounded border px-3 py-2 text-sm" style={{ borderColor: "#D9CBB3" }} />
+        <input placeholder="Nº de pedido (opcional)" value={form.orderId} onChange={(e) => setForm((f) => ({ ...f, orderId: e.target.value }))} className="rounded border px-3 py-2 text-sm" style={{ borderColor: "#D9CBB3" }} />
+        <input placeholder="Asunto" value={form.subject} onChange={(e) => setForm((f) => ({ ...f, subject: e.target.value }))} className="rounded border px-3 py-2 text-sm" style={{ borderColor: "#D9CBB3" }} />
+        <textarea placeholder="Cuéntanos qué ha pasado" value={form.message} onChange={(e) => setForm((f) => ({ ...f, message: e.target.value }))} rows={5} className="rounded border px-3 py-2 text-sm" style={{ borderColor: "#D9CBB3" }} />
+        {error && <p className="text-xs font-medium" style={{ color: "#B04A2F" }}>{error}</p>}
+        <button
+          disabled={!canSubmit || sending}
+          onClick={submit}
+          className="rounded-md py-2.5 text-sm font-semibold text-white disabled:opacity-40"
+          style={{ backgroundColor: "#E85D42" }}
+        >
+          {sending ? "Enviando…" : "Enviar mensaje"}
+        </button>
+      </div>
     </div>
   );
 }

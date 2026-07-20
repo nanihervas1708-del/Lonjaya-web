@@ -24,6 +24,21 @@ export async function sendEmail({ to, subject, html }) {
   }
 }
 
+/** Igual que sendEmail, pero para avisos al administrador: el destinatario
+ * se resuelve siempre en el servidor (variable ADMIN_EMAIL), nunca se envía
+ * desde el navegador, así su dirección no queda expuesta en ningún momento. */
+export async function sendAdminNotification({ subject, html }) {
+  try {
+    await fetch("/.netlify/functions/notify-admin", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ subject, html }),
+    });
+  } catch {
+    // Igual que arriba: nunca debe romper la experiencia del usuario.
+  }
+}
+
 function moneyRow(label, value) {
   return `<tr><td style="padding:4px 8px">${label}</td><td style="padding:4px 8px;text-align:right">${value.toFixed(2)} €</td></tr>`;
 }
