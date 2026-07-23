@@ -80,23 +80,7 @@ const VENDOR_SEED = [
 /* Vendor ids treated as "más vendido" for storefront ribbons */
 const BESTSELLER_IDS = new Set(["p13", "p22", "p2", "p9", "p31"]);
 
-/* Productos en "oferta relámpago" hasta el cierre de la lonja de hoy */
-const FLASH_DEAL_IDS = ["p1", "p14", "p22", "p31"];
-const FLASH_DISCOUNT = 0.22;
-
-/* Feed de compras simuladas para dar sensación de actividad en vivo */
-const ACTIVITY_FEED = [
-  { city: "Madrid", product: "Langostino de Sanlúcar" },
-  { city: "Bilbao", product: "Bonito del Norte" },
-  { city: "Sevilla", product: "Gamba blanca de Huelva" },
-  { city: "Barcelona", product: "Cigala de roca" },
-  { city: "Valencia", product: "Dorada" },
-  { city: "Vigo", product: "Pulpo gallego cocido" },
-  { city: "Zaragoza", product: "Salmón ahumado" },
-  { city: "Málaga", product: "Bogavante vivo" },
-  { city: "A Coruña", product: "Mejillón de batea" },
-  { city: "San Sebastián", product: "Atún rojo (lomo)" },
-];
+/* Umbral de stock bajo para avisos de urgencia en la tienda */
 
 const PRODUCT_SEED = [
   { id: "p1", name: "Atún rojo (lomo)", category: "pescado-azul", vendorId: "v1", price: 24.9, unit: "kg", stock: 18, freshness: "hoy", origin: "Cantábrico", emoji: "🐟", desc: "Lomo de atún rojo, corte limpio, ideal para tartar o plancha." },
@@ -244,31 +228,43 @@ function useMarketCountdown() {
 }
 
 /* Ticker flotante de compras recientes (prueba social simulada) */
-function LiveActivityTicker() {
+function LiveActivityTicker({ orders }) {
   const [idx, setIdx] = useState(0);
   const [visible, setVisible] = useState(false);
   const [dismissed, setDismissed] = useState(false);
 
-  useEffect(() => {
-    if (dismissed) return;
-    const showTimer = setTimeout(() => setVisible(true), 2500);
-    return () => clearTimeout(showTimer);
-  }, [dismissed]);
+  // Solo pedidos reales: ciudad real + producto real, nunca datos inventados.
+  // Sin nombre del comprador. Si todavía no hay pedidos, no se muestra nada.
+  const feed = useMemo(() => {
+    const items = [];
+    for (const o of orders) {
+      const city = o.shippingAddress?.city;
+      if (!city) continue;
+      for (const l of o.lines) items.push({ city, product: l.name });
+    }
+    return items.slice(0, 15);
+  }, [orders]);
 
   useEffect(() => {
-    if (dismissed) return;
+    if (dismissed || feed.length === 0) return;
+    const showTimer = setTimeout(() => setVisible(true), 2500);
+    return () => clearTimeout(showTimer);
+  }, [dismissed, feed.length]);
+
+  useEffect(() => {
+    if (dismissed || feed.length === 0) return;
     const cycle = setInterval(() => {
       setVisible(false);
       setTimeout(() => {
-        setIdx((i) => (i + 1) % ACTIVITY_FEED.length);
+        setIdx((i) => (i + 1) % feed.length);
         setVisible(true);
       }, 400);
     }, 6000);
     return () => clearInterval(cycle);
-  }, [dismissed]);
+  }, [dismissed, feed.length]);
 
-  if (dismissed) return null;
-  const item = ACTIVITY_FEED[idx];
+  if (dismissed || feed.length === 0) return null;
+  const item = feed[idx];
 
   return (
     <div
@@ -919,7 +915,7 @@ export default function App() {
           </button>
           <p className="text-xs" style={{ color: "#7C8B8E", fontFamily: "'IBM Plex Mono', monospace" }}>
             LonjaYa — marketplace de pescado y marisco de lonja a mesa. Comisión transparente por venta, tú fijas tus precios.
-            {" "}Logística en frío a cargo de {LOGISTICS_INFO.partnerName}. Prototipo de demostración.
+            {" "}Logística en frío a cargo de {LOGISTICS_INFO.partnerName}.
           </p>
           <div className="flex flex-wrap items-center justify-center gap-x-3 gap-y-1 text-[11px]" style={{ color: "#5C6B6E" }}>
             {[
@@ -942,7 +938,7 @@ export default function App() {
         </div>
       </footer>
 
-      {view === "home" && <LiveActivityTicker />}
+      {view === "home" && <LiveActivityTicker orders={orders} />}
 
       {/* ---------------- TOAST ---------------- */}
       {toast && (
@@ -1043,7 +1039,9 @@ function HomeView({ products, vendors, goTo, addToCart }) {
   const featured = products.filter((p) => p.freshness === "hoy").slice(0, 8);
   const vendorOf = (id) => vendors.find((v) => v.id === id);
   const countdown = useMarketCountdown();
-  const flashProducts = FLASH_DEAL_IDS.map((id) => products.find((p) => p.id === id)).filter(Boolean);
+  // Solo productos con un descuento real puesto por su propio vendedor
+  // (compareAtPrice > price) — nunca un porcentaje inventado por la web.
+  const flashProducts = products.filter((p) => p.compareAtPrice && p.compareAtPrice > p.price);
   const topVendors = [...vendors].filter((v) => v.status === "activo").sort((a, b) => b.rating - a.rating).slice(0, 3);
 
   return (
@@ -1096,8 +1094,8 @@ function HomeView({ products, vendors, goTo, addToCart }) {
             <div className="flex items-center gap-2">
               <span className="flex h-7 w-7 items-center justify-center rounded-full" style={{ backgroundColor: "#E85D42" }}>⚡</span>
               <div>
-                <h2 className="text-lg font-semibold text-white" style={{ fontFamily: "'Fraunces', serif" }}>Subasta relámpago</h2>
-                <p className="text-[11px]" style={{ color: "#9FB0AC" }}>Precio directo de lonja, sin intermediarios — solo hasta el cierre de hoy</p>
+                <h2 className="text-lg font-semibold text-white" style={{ fontFamily: "'Fraunces', serif" }}>Ofertas del día</h2>
+                <p className="text-[11px]" style={{ color: "#9FB0AC" }}>Rebajas reales puestas por cada vendedor — solo hasta el cierre de hoy</p>
               </div>
             </div>
             <div className="flex items-center gap-1.5 rounded-md px-3 py-1.5" style={{ backgroundColor: "#0E3A45" }}>
@@ -1112,7 +1110,7 @@ function HomeView({ products, vendors, goTo, addToCart }) {
           </div>
           <div className="grid grid-cols-2 gap-3 p-5 sm:grid-cols-4">
             {flashProducts.map((p) => {
-              const refPrice = Math.round(p.price * (1 + FLASH_DISCOUNT) * 100) / 100;
+              const pct = Math.round((1 - p.price / p.compareAtPrice) * 100);
               return (
                 <button
                   key={p.id}
@@ -1123,11 +1121,11 @@ function HomeView({ products, vendors, goTo, addToCart }) {
                   <span className="text-4xl">{p.emoji}</span>
                   <span className="mt-2 text-xs font-semibold text-white">{p.name}</span>
                   <span className="mt-1 rounded px-1.5 py-0.5 text-[10px] font-bold" style={{ backgroundColor: "#E85D42", color: "white" }}>
-                    -{Math.round(FLASH_DISCOUNT * 100)}%
+                    -{pct}%
                   </span>
                   <div className="mt-1.5 flex items-baseline gap-1.5">
                     <span className="text-sm font-bold" style={{ color: "#E85D42", fontFamily: "'IBM Plex Mono', monospace" }}>{eur(p.price)}</span>
-                    <span className="text-[11px] line-through" style={{ color: "#7C8B8E" }}>{eur(refPrice)}</span>
+                    <span className="text-[11px] line-through" style={{ color: "#7C8B8E" }}>{eur(p.compareAtPrice)}</span>
                   </div>
                 </button>
               );
@@ -2332,6 +2330,14 @@ function ProductEditorModal({ product, categories, onClose, onSave }) {
             <select value={form.unit} onChange={(e) => setForm((f) => ({ ...f, unit: e.target.value }))} className="rounded border px-3 py-2 text-sm" style={{ borderColor: "#D9CBB3" }}>
               <option value="kg">kg</option><option value="unidad">unidad</option><option value="docena">docena</option>
             </select>
+          </div>
+          <div>
+            <input
+              type="number" step="0.1" placeholder="Precio anterior (opcional, para mostrar oferta real)"
+              value={form.compareAtPrice || ""} onChange={(e) => setForm((f) => ({ ...f, compareAtPrice: e.target.value ? Number(e.target.value) : null }))}
+              className="w-full rounded border px-3 py-2 text-sm" style={{ borderColor: "#D9CBB3" }}
+            />
+            <p className="mt-1 text-[11px]" style={{ color: "#5C6B6E" }}>Solo rellénalo si de verdad vendías antes a ese precio — así el producto puede aparecer en "Ofertas del día" con el descuento calculado de forma real.</p>
           </div>
           <div className="grid grid-cols-2 gap-2">
             <input type="number" placeholder="Stock" value={form.stock} onChange={(e) => setForm((f) => ({ ...f, stock: Number(e.target.value) }))} className="rounded border px-3 py-2 text-sm" style={{ borderColor: "#D9CBB3" }} />
