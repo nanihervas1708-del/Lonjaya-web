@@ -2,7 +2,7 @@ import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import { storage, uploadProductImage } from "./lib/storage";
 import { trackPageView, trackProductView, trackSearch, trackHeartbeat, fetchAnalyticsSummary } from "./lib/analytics";
 import { signIn, signUpVendor, signOut, getAuthSession, onAuthChange, isVendorAccount } from "./lib/auth";
-import { fetchVendors, fetchProducts, upsertVendorRow, bulkInsertVendors, upsertProductRow, bulkInsertProducts, deleteProductRow } from "./lib/marketplace";
+import { fetchVendors, fetchProducts, upsertVendorRow, bulkInsertVendors, upsertProductRow, bulkInsertProducts, deleteProductRow, decrementProductStock } from "./lib/marketplace";
 import { sendEmail, sendAdminNotification, buildOrderConfirmationEmail, buildVendorNewOrderEmail, buildAdminNewVendorEmail } from "./lib/emails";
 import { marked } from "marked";
 import { LEGAL_DOCS } from "./lib/legalContent";
@@ -461,24 +461,39 @@ export default function App() {
 
   /* -------- cart ops -------- */
   const addToCart = (productId, qty = 1) => {
+    const product = products.find((p) => p.id === productId);
+    const stock = product?.stock ?? 0;
     setCart((prev) => {
       const existing = prev.find((i) => i.productId === productId);
+      const currentQty = existing?.qty ?? 0;
+      const desiredQty = currentQty + qty;
+      const finalQty = Math.min(desiredQty, stock);
+      if (finalQty <= 0) return prev;
       let next;
       if (existing) {
-        next = prev.map((i) => (i.productId === productId ? { ...i, qty: i.qty + qty } : i));
+        next = prev.map((i) => (i.productId === productId ? { ...i, qty: finalQty } : i));
       } else {
-        next = [...prev, { productId, qty }];
+        next = [...prev, { productId, qty: finalQty }];
       }
       savePersonal("lonja:cart", next);
       return next;
     });
-    showToast("Añadido a la cesta");
+    if (stock <= 0) {
+      showToast("Sin stock disponible ahora mismo");
+    } else if ((cart.find((i) => i.productId === productId)?.qty ?? 0) + qty > stock) {
+      showToast(`Solo quedan ${stock} disponibles, se ha ajustado la cantidad`);
+    } else {
+      showToast("Añadido a la cesta");
+    }
   };
   const updateQty = (productId, qty) => {
+    const product = products.find((p) => p.id === productId);
+    const stock = product?.stock ?? 0;
+    const cappedQty = Math.min(qty, stock);
     setCart((prev) => {
-      const next = qty <= 0
+      const next = cappedQty <= 0
         ? prev.filter((i) => i.productId !== productId)
-        : prev.map((i) => (i.productId === productId ? { ...i, qty } : i));
+        : prev.map((i) => (i.productId === productId ? { ...i, qty: cappedQty } : i));
       savePersonal("lonja:cart", next);
       return next;
     });
@@ -655,6 +670,18 @@ export default function App() {
     setPoints(nextPoints);
     await savePersonal("lonja:points", nextPoints);
     setLastOrder(order);
+
+    // Descontar stock real (de forma atómica, vía función de base de datos)
+    // por cada producto comprado, y reflejarlo al instante en la app.
+    for (const l of order.lines) {
+      try {
+        const { newStock } = await decrementProductStock(l.productId, l.qty);
+        setProducts((prev) => prev.map((p) => (p.id === l.productId ? { ...p, stock: newStock } : p)));
+      } catch (err) {
+        // Si falla el descuento de stock no bloqueamos la confirmación del
+        // pedido (ya está pagado) — pero conviene revisarlo manualmente.
+      }
+    }
 
     // Notificaciones por email: al comprador (confirmación) y a cada
     // vendedor implicado (solo con sus propias líneas del pedido).
@@ -1021,10 +1048,11 @@ function ProductCard({ product, vendor, onOpen, onAdd }) {
       <div className="px-3 pb-3">
         <button
           onClick={() => onAdd(product.id)}
-          className="flex w-full items-center justify-center gap-1.5 rounded-md py-1.5 text-xs font-semibold text-white transition-colors"
-          style={{ backgroundColor: "#0E3A45" }}
+          disabled={product.stock <= 0}
+          className="flex w-full items-center justify-center gap-1.5 rounded-md py-1.5 text-xs font-semibold text-white transition-colors disabled:cursor-not-allowed disabled:opacity-50"
+          style={{ backgroundColor: product.stock <= 0 ? "#5C6B6E" : "#0E3A45" }}
         >
-          <Plus size={14} /> Añadir a la cesta
+          {product.stock <= 0 ? "Agotado" : <><Plus size={14} /> Añadir a la cesta</>}
         </button>
       </div>
     </div>
@@ -1372,14 +1400,15 @@ function ProductView({ product, vendor, allProducts, vendors, addToCart, goTo })
             <div className="flex items-center rounded-md border" style={{ borderColor: "#D9CBB3" }}>
               <button onClick={() => setQty((q) => Math.max(1, q - 1))} className="p-2"><Minus size={14} /></button>
               <span className="w-8 text-center text-sm">{qty}</span>
-              <button onClick={() => setQty((q) => q + 1)} className="p-2"><Plus size={14} /></button>
+              <button onClick={() => setQty((q) => Math.min(product.stock, q + 1))} className="p-2"><Plus size={14} /></button>
             </div>
             <button
               onClick={() => addToCart(product.id, qty)}
-              className="flex flex-1 items-center justify-center gap-2 rounded-md py-2.5 text-sm font-semibold text-white"
-              style={{ backgroundColor: "#0E3A45" }}
+              disabled={product.stock <= 0}
+              className="flex flex-1 items-center justify-center gap-2 rounded-md py-2.5 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50"
+              style={{ backgroundColor: product.stock <= 0 ? "#5C6B6E" : "#0E3A45" }}
             >
-              <ShoppingCart size={16} /> Añadir a la cesta
+              {product.stock <= 0 ? "Agotado" : <><ShoppingCart size={16} /> Añadir a la cesta</>}
             </button>
           </div>
 

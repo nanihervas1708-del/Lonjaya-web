@@ -122,3 +122,16 @@ export async function deleteProductRow(id) {
   const { error } = await supabase.from("products").delete().eq("id", id);
   if (error) throw error;
 }
+
+/**
+ * Descuenta stock de un producto de forma atómica y segura (vía función de
+ * base de datos, para evitar sobreventa si dos compras llegan a la vez).
+ * Devuelve { newStock, decremented } — "decremented" puede ser menor que
+ * "qty" si no quedaba suficiente stock disponible.
+ */
+export async function decrementProductStock(productId, qty) {
+  const { data, error } = await supabase.rpc("decrement_stock", { p_product_id: productId, p_qty: qty });
+  if (error) throw error;
+  const row = data?.[0];
+  return { newStock: row?.new_stock ?? 0, decremented: row?.decremented ?? 0 };
+}
