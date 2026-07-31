@@ -1,16 +1,14 @@
 import { supabase } from "./storage";
 
 /**
- * Autenticación real con Supabase Auth, usada por DOS tipos de cuenta:
+ * Autenticación real con Supabase Auth, usada por estos tipos de cuenta:
  *
  *  - ADMIN: un único usuario creado a mano por ti en el panel de Supabase
  *    (Authentication > Users). No tiene "role" en sus metadatos.
- *  - VENDEDOR: se crea a sí mismo al rellenar "Vender en LonjaYa" (email +
- *    contraseña). Se marca con user_metadata.role = "vendedor" para poder
- *    diferenciarlo de un admin al iniciar sesión.
- *
- * El comprador sigue siendo un acceso de demostración sin contraseña; no
- * se ha tocado en este cambio.
+ *  - VENDEDOR: se crea a sí mismo al rellenar "Vender en LonjaYa". Se marca
+ *    con user_metadata.role = "vendedor".
+ *  - COMPRADOR: se crea a sí mismo antes de poder hacer un pedido. Se marca
+ *    con user_metadata.role = "comprador".
  */
 
 export async function signIn(email, password) {
@@ -33,11 +31,23 @@ export async function signUpVendor(email, password, profile = {}) {
   return data.user;
 }
 
+/** Crea una cuenta nueva de comprador (nombre y teléfono en los metadatos).
+ * También requiere confirmar el email antes de poder iniciar sesión. */
+export async function signUpBuyer(email, password, profile = {}) {
+  const { data, error } = await supabase.auth.signUp({
+    email,
+    password,
+    options: { data: { role: "comprador", ...profile } },
+  });
+  if (error) throw error;
+  return data.user;
+}
+
 export async function signOut() {
   await supabase.auth.signOut();
 }
 
-/** Devuelve el usuario autenticado (admin o vendedor) si hay sesión activa, o null. */
+/** Devuelve el usuario autenticado si hay sesión activa, o null. */
 export async function getAuthSession() {
   const { data } = await supabase.auth.getSession();
   return data.session?.user || null;
@@ -51,7 +61,13 @@ export function onAuthChange(callback) {
   return () => data.subscription.unsubscribe();
 }
 
-/** true si el usuario autenticado es un vendedor (por sus metadatos); false si es el admin. */
+/** true si el usuario autenticado es un vendedor (por sus metadatos). */
 export function isVendorAccount(authUser) {
   return authUser?.user_metadata?.role === "vendedor";
 }
+
+/** true si el usuario autenticado es un comprador (por sus metadatos). */
+export function isBuyerAccount(authUser) {
+  return authUser?.user_metadata?.role === "comprador";
+}
+

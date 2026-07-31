@@ -1,8 +1,9 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import { storage, uploadProductImage } from "./lib/storage";
 import { trackPageView, trackProductView, trackSearch, trackHeartbeat, fetchAnalyticsSummary } from "./lib/analytics";
-import { signIn, signUpVendor, signOut, getAuthSession, onAuthChange, isVendorAccount } from "./lib/auth";
+import { signIn, signUpVendor, signUpBuyer, signOut, getAuthSession, onAuthChange, isVendorAccount, isBuyerAccount } from "./lib/auth";
 import { fetchVendors, fetchProducts, upsertVendorRow, bulkInsertVendors, upsertProductRow, bulkInsertProducts, deleteProductRow, decrementProductStock } from "./lib/marketplace";
+import { fetchAuctions, createAuctionRow, cancelAuctionRow, computeCurrentPrice, reserveAuction, confirmAuctionSale, releaseAuctionReservation } from "./lib/auctions";
 import { sendEmail, sendAdminNotification, buildOrderConfirmationEmail, buildVendorNewOrderEmail, buildAdminNewVendorEmail } from "./lib/emails";
 import { marked } from "marked";
 import { LEGAL_DOCS } from "./lib/legalContent";
@@ -227,6 +228,15 @@ function useMarketCountdown() {
   return { h, m, s };
 }
 
+/* "Tick" cada segundo para recalcular en pantalla el precio de las subastas en vivo. */
+function useAuctionTick() {
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => setTick((t) => t + 1), 1000);
+    return () => clearInterval(id);
+  }, []);
+}
+
 /* Ticker flotante de compras recientes (prueba social simulada) */
 function LiveActivityTicker({ orders }) {
   const [idx, setIdx] = useState(0);
@@ -354,6 +364,7 @@ export default function App() {
   const [ready, setReady] = useState(false);
   const [products, setProducts] = useState([]);
   const [vendors, setVendors] = useState([]);
+  const [auctions, setAuctions] = useState([]);
   const [orders, setOrders] = useState([]);
   const [cart, setCart] = useState([]);
   const [user, setUser] = useState(null);
@@ -364,6 +375,7 @@ export default function App() {
   const [view, setView] = useState("home");
   const [activeCategory, setActiveCategory] = useState(null);
   const [activeProductId, setActiveProductId] = useState(null);
+  const [activeAuctionId, setActiveAuctionId] = useState(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [toast, setToast] = useState(null);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -399,14 +411,16 @@ export default function App() {
       let c = await loadPersonal("lonja:cart", []);
       let u = await loadPersonal("lonja:user", null);
       let pts = await loadPersonal("lonja:points", 0);
+      let auc = [];
+      try { auc = await fetchAuctions(); } catch {}
 
       // Admin y vendedor nunca se restauran desde el almacenamiento "demo":
       // dependen de la sesión real de Supabase Auth (ver useEffect de abajo).
-      if (u?.role === "admin" || u?.role === "vendedor") u = null;
+      if (u?.role === "admin" || u?.role === "vendedor" || u?.role === "comprador") u = null;
       const sessionUser = await getAuthSession();
       setAuthUser(sessionUser);
 
-      setProducts(p); setVendors(v); setOrders(o); setCart(c); setUser(u); setPoints(pts);
+      setProducts(p); setVendors(v); setOrders(o); setCart(c); setUser(u); setPoints(pts); setAuctions(auc);
       setReady(true);
       trackPageView("home");
     })();
@@ -427,15 +441,18 @@ export default function App() {
   }, []);
 
   // Traduce la sesión cruda de Supabase Auth (authUser) al usuario de la app:
-  // admin, o vendedor (buscando qué lonja tiene ese id de cuenta como dueña).
+  // admin, vendedor, o comprador (según los metadatos de la cuenta).
   useEffect(() => {
     if (!authUser) {
-      setUser((prev) => (prev?.role === "admin" || prev?.role === "vendedor" ? null : prev));
+      setUser((prev) => (prev?.role === "admin" || prev?.role === "vendedor" || prev?.role === "comprador" ? null : prev));
       return;
     }
     if (isVendorAccount(authUser)) {
       const vendor = vendors.find((v) => v.ownerUserId === authUser.id);
       setUser(vendor ? { name: vendor.name, role: "vendedor", vendorId: vendor.id } : null);
+    } else if (isBuyerAccount(authUser)) {
+      const meta = authUser.user_metadata || {};
+      setUser({ name: meta.name || authUser.email, role: "comprador", email: authUser.email, phone: meta.phone || "" });
     } else {
       setUser({ name: authUser.email, role: "admin", vendorId: null });
     }
@@ -452,6 +469,7 @@ export default function App() {
     setMenuOpen(false);
     if (extra.category !== undefined) setActiveCategory(extra.category);
     if (extra.productId !== undefined) setActiveProductId(extra.productId);
+    if (extra.auctionId !== undefined) setActiveAuctionId(extra.auctionId);
     trackPageView(v);
     if (v === "product" && extra.productId) {
       const p = products.find((x) => x.id === extra.productId);
@@ -508,13 +526,15 @@ export default function App() {
   const cartCount = useMemo(() => cart.reduce((s, i) => s + i.qty, 0), [cart]);
 
   /* -------- auth -------- */
-  // Comprador: acceso de demostración, sin contraseña.
-  const login = async (name) => {
-    const u = { name, role: "comprador", vendorId: null };
-    setUser(u);
-    await savePersonal("lonja:user", u);
-    showToast("Sesión iniciada como comprador");
+  // Comprador: cuenta real con email + contraseña vía Supabase Auth.
+  const loginBuyer = async (email, password) => {
+    await signIn(email, password); // lanza error si falla; el useEffect resuelve el rol
+    showToast("Sesión iniciada");
     goTo("home");
+  };
+
+  const registerBuyer = async ({ name, email, phone, password }) => {
+    await signUpBuyer(email, password, { name, phone });
   };
 
   // Admin y vendedor: acceso real con email + contraseña vía Supabase Auth.
@@ -545,6 +565,7 @@ export default function App() {
         ownerUserId: authedUser.id,
         email: authedUser.email,
         location: meta.location || "",
+        phone: meta.phone || "",
         rating: 0,
         since: new Date().getFullYear(),
         specialty: meta.specialty || CATEGORIES[0].id,
@@ -569,7 +590,7 @@ export default function App() {
   };
 
   const logout = async () => {
-    if (user?.role === "admin" || user?.role === "vendedor") await signOut();
+    if (user?.role === "admin" || user?.role === "vendedor" || user?.role === "comprador") await signOut();
     setUser(null);
     await savePersonal("lonja:user", null);
     goTo("home");
@@ -628,13 +649,33 @@ export default function App() {
     }
   };
 
+  /* -------- subastas (solo admin puede crear/cancelar) -------- */
+  const createAuction = async (auction) => {
+    try {
+      await createAuctionRow(auction);
+      setAuctions((prev) => [{ ...auction, status: "activa", startedAt: new Date().toISOString() }, ...prev]);
+      showToast("Subasta lanzada");
+    } catch (err) {
+      showToast("No se pudo crear la subasta");
+      throw err;
+    }
+  };
+  const cancelAuction = async (id) => {
+    try {
+      await cancelAuctionRow(id);
+      setAuctions((prev) => prev.map((a) => (a.id === id ? { ...a, status: "cancelada" } : a)));
+    } catch (err) {
+      showToast("No se pudo cancelar la subasta");
+    }
+  };
+
   /* Alta de vendedor: solo crea la cuenta de acceso (email + contraseña).
    * La ficha de la lonja se crea más adelante, en el primer inicio de
    * sesión ya confirmado (ver loginVendor) — justo después de registrarse
    * todavía no hay sesión activa (falta confirmar el email) y las políticas
    * de seguridad no permitirían crear la fila sin estar autenticado. */
-  const registerSeller = async ({ storeName, location, specialty, bio, ownerName, vendorType, email, password }) => {
-    await signUpVendor(email, password, { storeName, ownerName, location, specialty, bio, vendorType });
+  const registerSeller = async ({ storeName, location, specialty, bio, ownerName, vendorType, email, phone, password }) => {
+    await signUpVendor(email, password, { storeName, ownerName, location, phone, specialty, bio, vendorType });
   };
 
   /* -------- checkout -------- */
@@ -698,11 +739,86 @@ export default function App() {
     return order;
   };
 
+  /* -------- compra de subastas: reserva a precio bloqueado + pago -------- */
+  const reserveAuctionForPurchase = async (auctionId) => {
+    if (!user || user.role !== "comprador") {
+      goTo("login");
+      throw new Error("Inicia sesión para pujar/comprar");
+    }
+    const price = await reserveAuction(auctionId, user.email); // precio calculado y fijado en el servidor
+    setAuctions((prev) => prev.map((a) => (a.id === auctionId ? { ...a, status: "reservada", soldPrice: price, reservedByEmail: user.email } : a)));
+    return price;
+  };
+
+  const releaseAuction = async (auctionId) => {
+    try {
+      await releaseAuctionReservation(auctionId, user?.email);
+      setAuctions((prev) => prev.map((a) => (a.id === auctionId ? { ...a, status: "activa", soldPrice: null, reservedByEmail: null } : a)));
+    } catch {}
+  };
+
+  const finalizeAuctionPurchase = async (auction, shippingAddress, payment) => {
+    const ok = await confirmAuctionSale(auction.id, user.email);
+    if (!ok) throw new Error("La reserva ha caducado. Vuelve a intentarlo.");
+
+    const product = products.find((p) => p.id === auction.productId);
+    const vendor = vendors.find((v) => v.id === auction.vendorId);
+    const rate = vendor?.commissionRate ?? DEFAULT_COMMISSION;
+    const price = auction.soldPrice;
+    const shippingCost = shippingCostForWeight(product?.unit === "kg" ? 1 : 1);
+    const earnedPoints = Math.round(price * LOYALTY_CONFIG.pointsPerEuro);
+
+    const order = {
+      id: "oa" + Date.now(),
+      user: user?.name || "Invitado",
+      date: new Date().toISOString(),
+      lines: [{
+        productId: auction.productId, name: product?.name || "Producto en subasta", vendorId: auction.vendorId,
+        qty: 1, unit: product?.unit || "kg", price,
+        commissionRate: rate, commission: Math.round(price * rate * 100) / 100, vendorPayout: Math.round(price * (1 - rate) * 100) / 100,
+      }],
+      subtotal: price,
+      shippingCost,
+      total: price + shippingCost,
+      shippingAddress,
+      payment: payment || null,
+      status: "confirmado",
+      pointsEarned: earnedPoints,
+      isAuction: true,
+    };
+    const next = [order, ...orders];
+    setOrders(next);
+    await saveShared("lonja:orders", next);
+    const nextPoints = points + earnedPoints;
+    setPoints(nextPoints);
+    await savePersonal("lonja:points", nextPoints);
+    setLastOrder(order);
+    setAuctions((prev) => prev.map((a) => (a.id === auction.id ? { ...a, status: "vendida" } : a)));
+
+    if (product) {
+      try {
+        const { newStock } = await decrementProductStock(product.id, 1);
+        setProducts((prev) => prev.map((p) => (p.id === product.id ? { ...p, stock: newStock } : p)));
+      } catch {}
+    }
+
+    sendEmail({ to: shippingAddress.email, ...buildOrderConfirmationEmail(order) });
+    if (vendor?.email) sendEmail({ to: vendor.email, ...buildVendorNewOrderEmail(order, order.lines, vendor.name) });
+
+    goTo("confirm", {});
+    return order;
+  };
+
   /* -------- derived: only show products from approved, active vendors -------- */
   const storefrontProducts = useMemo(() => {
     const activeIds = new Set(vendors.filter((v) => v.status === "activo").map((v) => v.id));
-    return products.filter((p) => activeIds.has(p.vendorId));
-  }, [products, vendors]);
+    // Un producto en subasta activa/reservada no se vende también al precio
+    // normal del catálogo a la vez (evitaría vender el mismo stock dos veces).
+    const inAuction = new Set(
+      auctions.filter((a) => a.status === "activa" || a.status === "reservada").map((a) => a.productId)
+    );
+    return products.filter((p) => activeIds.has(p.vendorId) && !inAuction.has(p.id));
+  }, [products, vendors, auctions]);
 
   /* -------- derived: filtered catalog -------- */
   const filteredProducts = useMemo(() => {
@@ -872,6 +988,13 @@ export default function App() {
               {c.emoji} {c.name}
             </button>
           ))}
+          <button
+            onClick={() => goTo("subastas")}
+            className="shrink-0 rounded px-3 py-1.5 text-xs font-semibold tracking-wide"
+            style={{ color: "#E85D42", backgroundColor: view === "subastas" ? "#1A4650" : "transparent" }}
+          >
+            ⚡ Subastas
+          </button>
         </nav>
       </header>
 
@@ -908,10 +1031,25 @@ export default function App() {
         {view === "checkout" && (
           <CheckoutView lines={cartLines} total={cartTotal} user={user} placeOrder={placeOrder} goTo={goTo} />
         )}
+        {view === "subastas" && (
+          <AuctionsView
+            auctions={auctions} products={products} vendors={vendors} user={user}
+            goTo={goTo} reserveAuctionForPurchase={reserveAuctionForPurchase} showToast={showToast}
+          />
+        )}
+        {view === "subasta-pago" && (
+          <AuctionCheckoutView
+            auction={auctions.find((a) => a.id === activeAuctionId)}
+            product={products.find((p) => p.id === auctions.find((a) => a.id === activeAuctionId)?.productId)}
+            vendor={vendors.find((v) => v.id === auctions.find((a) => a.id === activeAuctionId)?.vendorId)}
+            user={user} goTo={goTo} finalizeAuctionPurchase={finalizeAuctionPurchase} releaseAuction={releaseAuction}
+          />
+        )}
         {view === "confirm" && <ConfirmView goTo={goTo} order={lastOrder} totalPoints={points} />}
         {view.startsWith("legal-") && <LegalPageView docId={view.replace("legal-", "")} goTo={goTo} />}
         {view === "contacto" && <ContactFormView goTo={goTo} />}
-        {view === "login" && <LoginView login={login} loginAdmin={loginAdmin} loginVendor={loginVendor} goTo={goTo} />}
+        {view === "login" && <LoginView loginBuyer={loginBuyer} loginAdmin={loginAdmin} loginVendor={loginVendor} goTo={goTo} />}
+        {view === "comprador-alta" && <BuyerSignupView registerBuyer={registerBuyer} goTo={goTo} />}
         {view === "vendor-dash" && user?.role === "vendedor" && (
           <VendorDashboard
             vendor={vendorOf(user.vendorId)}
@@ -927,6 +1065,9 @@ export default function App() {
             vendors={vendors}
             products={products}
             orders={orders}
+            auctions={auctions}
+            createAuction={createAuction}
+            cancelAuction={cancelAuction}
             setVendorStatus={setVendorStatus}
             setVendorCommission={setVendorCommission}
             addVendor={addVendor}
@@ -1457,6 +1598,179 @@ function ProductView({ product, vendor, allProducts, vendors, addToCart, goTo })
 /*  CART                                                                */
 /* ------------------------------------------------------------------ */
 
+/* ------------------------------------------------------------------ */
+/*  SUBASTAS — TIENDA                                                   */
+/* ------------------------------------------------------------------ */
+
+function AuctionsView({ auctions, products, vendors, user, goTo, reserveAuctionForPurchase, showToast }) {
+  useAuctionTick();
+  const active = auctions.filter((a) => a.status === "activa" || (a.status === "reservada" && new Date(a.reservedUntil) > new Date()));
+
+  const handleBuy = async (auction) => {
+    try {
+      await reserveAuctionForPurchase(auction.id);
+      goTo("subasta-pago", { auctionId: auction.id });
+    } catch (err) {
+      showToast(err.message || "No se pudo reservar la subasta");
+    }
+  };
+
+  return (
+    <div>
+      <h1 className="mb-1 text-xl font-semibold" style={{ fontFamily: "'Fraunces', serif" }}>Subastas a la baja</h1>
+      <p className="mb-6 text-sm" style={{ color: "#5C6B6E" }}>El precio baja solo con el tiempo — cómpralo antes de que otro lo haga.</p>
+
+      {active.length === 0 ? (
+        <div className="rounded-lg border border-dashed py-16 text-center text-sm" style={{ borderColor: "#D9CBB3", color: "#5C6B6E" }}>
+          No hay ninguna subasta activa ahora mismo. Vuelve más tarde.
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-3">
+          {active.map((a) => {
+            const product = products.find((p) => p.id === a.productId);
+            const vendor = vendors.find((v) => v.id === a.vendorId);
+            const price = a.status === "reservada" ? a.soldPrice : computeCurrentPrice(a);
+            const atMin = price <= a.minPrice;
+            const isMine = a.status === "reservada" && a.reservedByEmail === user?.email;
+            const isTaken = a.status === "reservada" && !isMine;
+            const range = a.startPrice - a.minPrice;
+            const progress = range > 0 ? Math.min(100, ((a.startPrice - price) / range) * 100) : 100;
+            return (
+              <div key={a.id} className="overflow-hidden rounded-xl" style={{ backgroundColor: "#16242A" }}>
+                <div className="flex h-40 items-center justify-center overflow-hidden" style={{ background: "linear-gradient(160deg,#1E3A40,#0E3A45)" }}>
+                  {a.image || product?.image ? (
+                    <img src={a.image || product.image} alt={product?.name} className="h-full w-full object-cover" />
+                  ) : (
+                    <span className="text-6xl">{product?.emoji || "🐟"}</span>
+                  )}
+                </div>
+                <div className="p-4">
+                  <span
+                    className="inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-[10px] font-bold"
+                    style={{ backgroundColor: isTaken ? "#5C6B6E" : atMin ? "#B0890033" : "#E85D4233", color: isTaken ? "#F6F8F7" : atMin ? "#B08900" : "#E85D42" }}
+                  >
+                    ● {isTaken ? "Reservada por otro comprador" : atMin ? "En precio mínimo" : "Bajando en vivo"}
+                  </span>
+                  <h3 className="mt-2 text-base font-semibold text-white">{product?.name || "Producto"}</h3>
+                  <p className="text-xs" style={{ color: "#9FB0AC" }}>{vendor?.name}</p>
+
+                  <div className="mt-3 flex items-baseline gap-1.5">
+                    <span className="text-2xl font-bold" style={{ color: "#E85D42", fontFamily: "'IBM Plex Mono', monospace" }}>{eur(price)}</span>
+                    <span className="text-xs" style={{ color: "#9FB0AC" }}>/{product?.unit || "kg"}</span>
+                  </div>
+
+                  <div className="mt-2 h-2 w-full overflow-hidden rounded-full" style={{ backgroundColor: "#2A4A50" }}>
+                    <div className="h-full rounded-full" style={{ width: `${progress}%`, backgroundColor: "#E85D42" }} />
+                  </div>
+                  <div className="mt-1 flex justify-between text-[10px]" style={{ color: "#7C8B8E" }}>
+                    <span>Máx. {eur(a.startPrice)}</span>
+                    <span>Mín. {eur(a.minPrice)}</span>
+                  </div>
+
+                  <button
+                    onClick={() => handleBuy(a)}
+                    disabled={isTaken}
+                    className="mt-3 w-full rounded-md py-2.5 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50"
+                    style={{ backgroundColor: isTaken ? "#5C6B6E" : "#E85D42" }}
+                  >
+                    {isTaken ? "No disponible" : "Comprar ahora a este precio"}
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  SUBASTAS — PAGO (precio bloqueado tras reservar)                    */
+/* ------------------------------------------------------------------ */
+
+function AuctionCheckoutView({ auction, product, vendor, user, goTo, finalizeAuctionPurchase, releaseAuction }) {
+  const [form, setForm] = useState({
+    name: user?.name || "", email: user?.email || "", phone: user?.phone || "", address: "", city: "", postal: "",
+  });
+  const [submitting, setSubmitting] = useState(false);
+  const [payError, setPayError] = useState("");
+
+  if (!auction || auction.status !== "reservada") {
+    return (
+      <div className="mx-auto max-w-sm py-20 text-center">
+        <p className="text-sm" style={{ color: "#5C6B6E" }}>Esta reserva ya no está disponible.</p>
+        <button onClick={() => goTo("subastas")} className="mt-4 rounded-md px-4 py-2 text-sm font-semibold text-white" style={{ backgroundColor: "#0E3A45" }}>Volver a subastas</button>
+      </div>
+    );
+  }
+
+  const shipping = shippingCostForWeight(1);
+  const grandTotal = auction.soldPrice + shipping;
+  const canSubmit = form.name && form.email.includes("@") && form.phone.trim() && form.address && form.city && form.postal;
+
+  const cancel = async () => {
+    await releaseAuction(auction.id);
+    goTo("subastas");
+  };
+
+  return (
+    <div className="mx-auto max-w-lg py-6">
+      <button onClick={cancel} className="mb-4 flex items-center gap-1 text-xs font-medium" style={{ color: "#5C6B6E" }}>
+        <ArrowLeft size={14} /> Cancelar y volver a subastas
+      </button>
+
+      <div className="mb-4 rounded-lg border p-4" style={{ borderColor: "#B08900", backgroundColor: "#B0890010" }}>
+        <p className="text-xs font-semibold" style={{ color: "#8A6A00" }}>Precio reservado para ti durante 10 minutos</p>
+        <div className="mt-1 flex items-center gap-3">
+          <span className="text-2xl">{product?.emoji || "🐟"}</span>
+          <div>
+            <p className="text-sm font-semibold">{product?.name}</p>
+            <p className="text-lg font-bold" style={{ color: "#E85D42", fontFamily: "'IBM Plex Mono', monospace" }}>{eur(auction.soldPrice)}</p>
+          </div>
+        </div>
+      </div>
+
+      <div className="rounded-lg border bg-white p-5" style={{ borderColor: "#E4D9C4" }}>
+        <h2 className="mb-3 text-sm font-semibold">Dirección de entrega</h2>
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+          <input placeholder="Nombre completo" value={form.name} onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} className="rounded border px-3 py-2 text-sm sm:col-span-2" style={{ borderColor: "#D9CBB3" }} />
+          <input type="tel" placeholder="Teléfono de contacto" value={form.phone} onChange={(e) => setForm((f) => ({ ...f, phone: e.target.value }))} className="rounded border px-3 py-2 text-sm sm:col-span-2" style={{ borderColor: "#D9CBB3" }} />
+          <input type="email" placeholder="Email" value={form.email} onChange={(e) => setForm((f) => ({ ...f, email: e.target.value }))} className="rounded border px-3 py-2 text-sm sm:col-span-2" style={{ borderColor: "#D9CBB3" }} />
+          <input placeholder="Dirección" value={form.address} onChange={(e) => setForm((f) => ({ ...f, address: e.target.value }))} className="rounded border px-3 py-2 text-sm sm:col-span-2" style={{ borderColor: "#D9CBB3" }} />
+          <input placeholder="Ciudad" value={form.city} onChange={(e) => setForm((f) => ({ ...f, city: e.target.value }))} className="rounded border px-3 py-2 text-sm" style={{ borderColor: "#D9CBB3" }} />
+          <input placeholder="Código postal" value={form.postal} onChange={(e) => setForm((f) => ({ ...f, postal: e.target.value }))} className="rounded border px-3 py-2 text-sm" style={{ borderColor: "#D9CBB3" }} />
+        </div>
+
+        <div className="mt-4 flex justify-between border-t pt-3 text-sm" style={{ borderColor: "#E4D9C4" }}>
+          <span>Envío</span><span>{eur(shipping)}</span>
+        </div>
+        <div className="mt-1 flex justify-between text-base font-bold">
+          <span>Total</span><span style={{ color: "#E85D42" }}>{eur(grandTotal)}</span>
+        </div>
+
+        <h2 className="mb-3 mt-5 text-sm font-semibold">Pago</h2>
+        {!canSubmit ? (
+          <p className="rounded-md border border-dashed p-3 text-xs" style={{ borderColor: "#D9CBB3", color: "#5C6B6E" }}>
+            Rellena tus datos para ver las opciones de pago.
+          </p>
+        ) : (
+          <PayPalCheckoutButton
+            amount={grandTotal}
+            submitting={submitting}
+            setSubmitting={setSubmitting}
+            onError={setPayError}
+            onSuccess={async (payment) => { await finalizeAuctionPurchase(auction, form, payment); }}
+          />
+        )}
+        {payError && <p className="mt-2 text-xs font-medium" style={{ color: "#B04A2F" }}>{payError}</p>}
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+
 function CartView({ lines, updateQty, removeFromCart, total, goTo }) {
   const weightKg = cartWeightKg(lines);
   const shippingCost = shippingCostForWeight(weightKg);
@@ -1519,14 +1833,34 @@ function CartView({ lines, updateQty, removeFromCart, total, goTo }) {
 /* ------------------------------------------------------------------ */
 
 function CheckoutView({ lines, total, user, placeOrder, goTo }) {
-  const [form, setForm] = useState({ name: user?.role === "comprador" ? user?.name || "" : "", email: "", address: "", city: "", postal: "", payment: "tarjeta", ageRange: "" });
+  const [form, setForm] = useState({
+    name: user?.role === "comprador" ? user?.name || "" : "",
+    email: user?.role === "comprador" ? user?.email || "" : "",
+    phone: user?.role === "comprador" ? user?.phone || "" : "",
+    address: "", city: "", postal: "", payment: "tarjeta", ageRange: "",
+  });
   const [submitting, setSubmitting] = useState(false);
   const [payError, setPayError] = useState("");
   const weightKg = cartWeightKg(lines);
   const shipping = shippingCostForWeight(weightKg);
   const grandTotal = total + shipping;
 
-  const canSubmit = form.name && form.email.includes("@") && form.address && form.city && form.postal;
+  if (user?.role !== "comprador") {
+    return (
+      <div className="mx-auto flex max-w-sm flex-col items-center gap-3 py-20 text-center">
+        <User size={32} color="#5C6B6E" />
+        <h2 className="text-lg font-semibold" style={{ fontFamily: "'Fraunces', serif" }}>Inicia sesión para continuar</h2>
+        <p className="text-sm" style={{ color: "#5C6B6E" }}>Necesitas una cuenta de comprador para finalizar tu pedido — es gratis y solo lleva un minuto.</p>
+        <div className="mt-2 flex w-full flex-col gap-2">
+          <button onClick={() => goTo("login")} className="rounded-md py-2.5 text-sm font-semibold text-white" style={{ backgroundColor: "#0E3A45" }}>Iniciar sesión</button>
+          <button onClick={() => goTo("comprador-alta")} className="rounded-md border py-2.5 text-sm font-semibold" style={{ borderColor: "#D9CBB3" }}>Crear cuenta</button>
+        </div>
+        <button onClick={() => goTo("cart")} className="mt-2 text-xs font-medium" style={{ color: "#5C6B6E" }}>Volver a la cesta</button>
+      </div>
+    );
+  }
+
+  const canSubmit = form.name && form.email.includes("@") && form.phone.trim() && form.address && form.city && form.postal;
 
   return (
     <div className="grid grid-cols-1 gap-8 lg:grid-cols-3">
@@ -1536,6 +1870,7 @@ function CheckoutView({ lines, total, user, placeOrder, goTo }) {
           <h2 className="mb-3 text-sm font-semibold">Dirección de entrega</h2>
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <input placeholder="Nombre completo" value={form.name} onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} className="rounded border px-3 py-2 text-sm sm:col-span-2" style={{ borderColor: "#D9CBB3" }} />
+            <input type="tel" placeholder="Teléfono de contacto" value={form.phone} onChange={(e) => setForm((f) => ({ ...f, phone: e.target.value }))} className="rounded border px-3 py-2 text-sm sm:col-span-2" style={{ borderColor: "#D9CBB3" }} />
             <input type="email" placeholder="Email (para la confirmación del pedido)" value={form.email} onChange={(e) => setForm((f) => ({ ...f, email: e.target.value }))} className="rounded border px-3 py-2 text-sm sm:col-span-2" style={{ borderColor: "#D9CBB3" }} />
             <input placeholder="Dirección" value={form.address} onChange={(e) => setForm((f) => ({ ...f, address: e.target.value }))} className="rounded border px-3 py-2 text-sm sm:col-span-2" style={{ borderColor: "#D9CBB3" }} />
             <input placeholder="Ciudad" value={form.city} onChange={(e) => setForm((f) => ({ ...f, city: e.target.value }))} className="rounded border px-3 py-2 text-sm" style={{ borderColor: "#D9CBB3" }} />
@@ -1892,10 +2227,8 @@ function ConfirmView({ goTo, order, totalPoints }) {
 /*  LOGIN (demo)                                                        */
 /* ------------------------------------------------------------------ */
 
-function LoginView({ login, loginAdmin, loginVendor, goTo }) {
-  const [name, setName] = useState("");
+function LoginView({ loginBuyer, loginAdmin, loginVendor, goTo }) {
   const [role, setRole] = useState("comprador");
-
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [authError, setAuthError] = useState("");
@@ -1906,7 +2239,8 @@ function LoginView({ login, loginAdmin, loginVendor, goTo }) {
     setSubmitting(true);
     try {
       if (role === "admin") await loginAdmin(email.trim(), password);
-      else await loginVendor(email.trim(), password);
+      else if (role === "vendedor") await loginVendor(email.trim(), password);
+      else await loginBuyer(email.trim(), password);
     } catch (err) {
       setAuthError(
         err?.message?.includes("asociada") || err?.message?.includes("no es de vendedor")
@@ -1918,11 +2252,13 @@ function LoginView({ login, loginAdmin, loginVendor, goTo }) {
     }
   };
 
+  const roleLabel = { comprador: "comprador", vendedor: "vendedor", admin: "administrador" }[role];
+
   return (
     <div className="mx-auto max-w-sm py-10">
       <h1 className="mb-1 text-xl font-semibold" style={{ fontFamily: "'Fraunces', serif" }}>Acceder a LonjaYa</h1>
       <p className="mb-6 text-xs" style={{ color: "#5C6B6E" }}>
-        Comprador es un acceso rápido de invitado. Vendedor y administrador requieren cuenta con contraseña.
+        Necesitas una cuenta para comprar, vender o administrar. El acceso de administrador se crea manualmente.
       </p>
 
       <label className="mb-1 block text-xs font-medium">Entrar como</label>
@@ -1939,55 +2275,118 @@ function LoginView({ login, loginAdmin, loginVendor, goTo }) {
         ))}
       </div>
 
-      {role === "comprador" ? (
-        <>
-          <label className="mb-1 block text-xs font-medium">Tu nombre</label>
-          <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Ej. Marta García" className="mb-4 w-full rounded border px-3 py-2 text-sm" style={{ borderColor: "#D9CBB3" }} />
-          <button
-            disabled={!name.trim()}
-            onClick={() => login(name.trim())}
-            className="w-full rounded-md py-2.5 text-sm font-semibold text-white disabled:opacity-40"
-            style={{ backgroundColor: "#E85D42" }}
-          >
-            Entrar
-          </button>
-        </>
+      <label className="mb-1 block text-xs font-medium">Email</label>
+      <input
+        type="email" value={email} onChange={(e) => setEmail(e.target.value)}
+        placeholder={role === "admin" ? "admin@lonjaya.com" : role === "vendedor" ? "tu@lonja.com" : "tu@email.com"} autoComplete="username"
+        className="mb-3 w-full rounded border px-3 py-2 text-sm" style={{ borderColor: "#D9CBB3" }}
+      />
+      <label className="mb-1 block text-xs font-medium">Contraseña</label>
+      <input
+        type="password" value={password} onChange={(e) => setPassword(e.target.value)}
+        placeholder="••••••••" autoComplete="current-password"
+        onKeyDown={(e) => e.key === "Enter" && email.trim() && password && submitAuth()}
+        className="mb-1 w-full rounded border px-3 py-2 text-sm" style={{ borderColor: "#D9CBB3" }}
+      />
+      {authError && <p className="mb-2 text-xs font-medium" style={{ color: "#B04A2F" }}>{authError}</p>}
+      {role === "admin" ? (
+        <p className="mb-4 mt-1 text-[11px]" style={{ color: "#5C6B6E" }}>
+          Este usuario se crea manualmente desde el panel de Supabase — no hay alta pública para administradores.
+        </p>
       ) : (
-        <>
-          <label className="mb-1 block text-xs font-medium">Email</label>
-          <input
-            type="email" value={email} onChange={(e) => setEmail(e.target.value)}
-            placeholder={role === "admin" ? "admin@lonjaya.com" : "tu@lonja.com"} autoComplete="username"
-            className="mb-3 w-full rounded border px-3 py-2 text-sm" style={{ borderColor: "#D9CBB3" }}
-          />
-          <label className="mb-1 block text-xs font-medium">Contraseña</label>
-          <input
-            type="password" value={password} onChange={(e) => setPassword(e.target.value)}
-            placeholder="••••••••" autoComplete="current-password"
-            onKeyDown={(e) => e.key === "Enter" && email.trim() && password && submitAuth()}
-            className="mb-1 w-full rounded border px-3 py-2 text-sm" style={{ borderColor: "#D9CBB3" }}
-          />
-          {authError && <p className="mb-2 text-xs font-medium" style={{ color: "#B04A2F" }}>{authError}</p>}
-          {role === "admin" ? (
-            <p className="mb-4 mt-1 text-[11px]" style={{ color: "#5C6B6E" }}>
-              Este usuario se crea manualmente desde el panel de Supabase — no hay alta pública para administradores.
-            </p>
-          ) : (
-            <p className="mb-4 mt-1 text-[11px]" style={{ color: "#5C6B6E" }}>
-              ¿Todavía no tienes cuenta de vendedor?{" "}
-              <button onClick={() => goTo("sell")} className="underline" style={{ color: "#2F6B5E" }}>Date de alta aquí</button>.
-            </p>
-          )}
-          <button
-            disabled={!email.trim() || !password || submitting}
-            onClick={submitAuth}
-            className="w-full rounded-md py-2.5 text-sm font-semibold text-white disabled:opacity-40"
-            style={{ backgroundColor: "#E85D42" }}
-          >
-            {submitting ? "Comprobando…" : role === "admin" ? "Entrar como administrador" : "Entrar como vendedor"}
-          </button>
-        </>
+        <p className="mb-4 mt-1 text-[11px]" style={{ color: "#5C6B6E" }}>
+          ¿Todavía no tienes cuenta{role === "vendedor" ? " de vendedor" : ""}?{" "}
+          <button onClick={() => goTo(role === "vendedor" ? "sell" : "comprador-alta")} className="underline" style={{ color: "#2F6B5E" }}>Date de alta aquí</button>.
+        </p>
       )}
+      <button
+        disabled={!email.trim() || !password || submitting}
+        onClick={submitAuth}
+        className="w-full rounded-md py-2.5 text-sm font-semibold text-white disabled:opacity-40"
+        style={{ backgroundColor: "#E85D42" }}
+      >
+        {submitting ? "Comprobando…" : `Entrar como ${roleLabel}`}
+      </button>
+      <button onClick={() => goTo("home")} className="mt-3 w-full text-xs font-medium" style={{ color: "#5C6B6E" }}>Cancelar</button>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  BUYER SIGN-UP                                                       */
+/* ------------------------------------------------------------------ */
+
+function BuyerSignupView({ registerBuyer, goTo }) {
+  const [form, setForm] = useState({ name: "", email: "", phone: "", password: "", password2: "" });
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState("");
+  const [done, setDone] = useState(false);
+
+  const passwordsOk = form.password.length >= 6 && form.password === form.password2;
+  const canSubmit = form.name.trim() && form.email.trim() && form.phone.trim() && passwordsOk;
+
+  const submit = async () => {
+    setError("");
+    setSubmitting(true);
+    try {
+      await registerBuyer(form);
+      setDone(true);
+    } catch (err) {
+      setError(err?.message?.includes("already registered") ? "Ese email ya tiene una cuenta. Prueba a iniciar sesión." : "No se pudo completar el registro. Revisa los datos e inténtalo de nuevo.");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  if (done) {
+    return (
+      <div className="mx-auto flex max-w-sm flex-col items-center gap-3 py-20 text-center">
+        <div className="flex h-16 w-16 items-center justify-center rounded-full" style={{ backgroundColor: "#2F6B5E1A" }}>
+          <Check size={30} color="#2F6B5E" />
+        </div>
+        <h2 className="text-xl font-semibold" style={{ fontFamily: "'Fraunces', serif" }}>¡Ya casi está!</h2>
+        <p className="text-sm" style={{ color: "#5C6B6E" }}>
+          Te hemos enviado un correo a <strong>{form.email}</strong> para confirmar tu cuenta. Confírmalo y después ya podrás iniciar sesión y comprar.
+        </p>
+        <button onClick={() => goTo("home")} className="mt-2 rounded-md px-4 py-2 text-sm font-semibold text-white" style={{ backgroundColor: "#0E3A45" }}>
+          Volver al inicio
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="mx-auto max-w-sm py-10">
+      <h1 className="mb-1 text-xl font-semibold" style={{ fontFamily: "'Fraunces', serif" }}>Crea tu cuenta</h1>
+      <p className="mb-6 text-xs" style={{ color: "#5C6B6E" }}>
+        Necesaria para poder hacer pedidos en LonjaYa.
+      </p>
+      <div className="flex flex-col gap-3">
+        <input placeholder="Tu nombre" value={form.name} onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} className="rounded border px-3 py-2 text-sm" style={{ borderColor: "#D9CBB3" }} />
+        <input type="email" placeholder="Email" value={form.email} onChange={(e) => setForm((f) => ({ ...f, email: e.target.value }))} className="rounded border px-3 py-2 text-sm" style={{ borderColor: "#D9CBB3" }} />
+        <input type="tel" placeholder="Teléfono de contacto" value={form.phone} onChange={(e) => setForm((f) => ({ ...f, phone: e.target.value }))} className="rounded border px-3 py-2 text-sm" style={{ borderColor: "#D9CBB3" }} />
+        <input type="password" placeholder="Contraseña (mín. 6)" value={form.password} onChange={(e) => setForm((f) => ({ ...f, password: e.target.value }))} className="rounded border px-3 py-2 text-sm" style={{ borderColor: "#D9CBB3" }} />
+        <input
+          type="password" placeholder="Repite la contraseña" value={form.password2} onChange={(e) => setForm((f) => ({ ...f, password2: e.target.value }))}
+          className="rounded border px-3 py-2 text-sm" style={{ borderColor: form.password2 && !passwordsOk ? "#B04A2F" : "#D9CBB3" }}
+        />
+        {form.password2 && !passwordsOk && (
+          <p className="text-[11px]" style={{ color: "#B04A2F" }}>Las contraseñas no coinciden o son demasiado cortas (mínimo 6 caracteres).</p>
+        )}
+      </div>
+      {error && <p className="mt-3 text-xs font-medium" style={{ color: "#B04A2F" }}>{error}</p>}
+      <button
+        disabled={!canSubmit || submitting}
+        onClick={submit}
+        className="mt-4 w-full rounded-md py-2.5 text-sm font-semibold text-white disabled:opacity-40"
+        style={{ backgroundColor: "#E85D42" }}
+      >
+        {submitting ? "Creando cuenta…" : "Crear cuenta"}
+      </button>
+      <p className="mt-3 text-center text-[11px]" style={{ color: "#5C6B6E" }}>
+        ¿Ya tienes cuenta?{" "}
+        <button onClick={() => goTo("login")} className="underline" style={{ color: "#2F6B5E" }}>Inicia sesión</button>.
+      </p>
       <button onClick={() => goTo("home")} className="mt-3 w-full text-xs font-medium" style={{ color: "#5C6B6E" }}>Cancelar</button>
     </div>
   );
@@ -1998,7 +2397,7 @@ function LoginView({ login, loginAdmin, loginVendor, goTo }) {
 /* ------------------------------------------------------------------ */
 
 function SellerSignupView({ registerSeller, categories, goTo }) {
-  const [form, setForm] = useState({ ownerName: "", storeName: "", location: "", specialty: categories[0].id, bio: "", vendorType: "pescaderia", email: "", password: "", password2: "" });
+  const [form, setForm] = useState({ ownerName: "", storeName: "", location: "", phone: "", specialty: categories[0].id, bio: "", vendorType: "pescaderia", email: "", password: "", password2: "" });
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
   const [done, setDone] = useState(false);
@@ -2006,7 +2405,7 @@ function SellerSignupView({ registerSeller, categories, goTo }) {
   const [avgPrice, setAvgPrice] = useState(20);
 
   const passwordsOk = form.password.length >= 6 && form.password === form.password2;
-  const canSubmit = form.ownerName && form.storeName && form.location && form.email.trim() && passwordsOk;
+  const canSubmit = form.ownerName && form.storeName && form.location && form.phone.trim() && form.email.trim() && passwordsOk;
 
   const gross = kg * avgPrice;
   const commission = gross * DEFAULT_COMMISSION;
@@ -2124,6 +2523,10 @@ function SellerSignupView({ registerSeller, categories, goTo }) {
             <input
               placeholder={form.vendorType === "web" ? "Ámbito de envío (ej. Venta online, España)" : "Ubicación (ciudad, puerto...)"}
               value={form.location} onChange={(e) => setForm((f) => ({ ...f, location: e.target.value }))} className="rounded border px-3 py-2 text-sm" style={{ borderColor: "#D9CBB3" }}
+            />
+            <input
+              type="tel" placeholder="Teléfono de contacto"
+              value={form.phone} onChange={(e) => setForm((f) => ({ ...f, phone: e.target.value }))} className="rounded border px-3 py-2 text-sm" style={{ borderColor: "#D9CBB3" }}
             />
             <select value={form.specialty} onChange={(e) => setForm((f) => ({ ...f, specialty: e.target.value }))} className="rounded border px-3 py-2 text-sm" style={{ borderColor: "#D9CBB3" }}>
               {categories.map((c) => <option key={c.id} value={c.id}>{c.emoji} {c.name}</option>)}
@@ -2496,7 +2899,150 @@ function DailySalesReport({ orders, vendors }) {
   );
 }
 
-function AdminView({ vendors, products, orders, setVendorStatus, setVendorCommission, addVendor }) {
+/* ------------------------------------------------------------------ */
+/*  SUBASTAS — ADMIN                                                    */
+/* ------------------------------------------------------------------ */
+
+function AuctionsAdminSection({ vendors, products, auctions, createAuction, cancelAuction }) {
+  useAuctionTick();
+  const [form, setForm] = useState({ productId: "", startPrice: "", minPrice: "", stepAmount: "", stepSeconds: 180, image: null });
+  const [uploading, setUploading] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState("");
+
+  const selectedProduct = products.find((p) => p.id === form.productId);
+  const canSubmit = form.productId && form.startPrice && form.minPrice && form.stepAmount &&
+    Number(form.startPrice) > Number(form.minPrice);
+
+  const handlePhoto = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setUploading(true);
+    try {
+      const url = await uploadProductImage(file);
+      setForm((f) => ({ ...f, image: url }));
+    } catch {
+      setError("No se pudo subir la foto.");
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const submit = async () => {
+    setError("");
+    setSubmitting(true);
+    try {
+      await createAuction({
+        id: "au" + Date.now(),
+        productId: form.productId,
+        vendorId: selectedProduct.vendorId,
+        image: form.image,
+        startPrice: Number(form.startPrice),
+        minPrice: Number(form.minPrice),
+        stepAmount: Number(form.stepAmount),
+        stepSeconds: Number(form.stepSeconds),
+      });
+      setForm({ productId: "", startPrice: "", minPrice: "", stepAmount: "", stepSeconds: 180, image: null });
+    } catch {
+      setError("No se pudo crear la subasta.");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const live = auctions.filter((a) => a.status === "activa" || a.status === "reservada");
+  const revenueFromAuctions = auctions.filter((a) => a.status === "vendida").reduce((s, a) => s + (a.soldPrice || 0), 0);
+
+  return (
+    <div className="mb-8">
+      <h2 className="mb-1 flex items-center gap-1.5 text-sm font-semibold uppercase tracking-wide" style={{ color: "#5C6B6E" }}>
+        ⚡ Subastas a la baja
+      </h2>
+      <p className="mb-3 text-[11px]" style={{ color: "#5C6B6E" }}>Solo tú puedes crear subastas y fijar el precio máximo y mínimo.</p>
+
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+        {/* Formulario nueva subasta */}
+        <div className="rounded-lg border bg-white p-4" style={{ borderColor: "#E4D9C4" }}>
+          <p className="mb-3 text-xs font-semibold">Nueva subasta</p>
+
+          <div className="mb-2 flex items-center gap-3">
+            <div className="flex h-14 w-14 shrink-0 items-center justify-center overflow-hidden rounded-lg text-2xl" style={{ background: "#EAF2EF" }}>
+              {form.image ? <img src={form.image} alt="" className="h-full w-full object-cover" /> : (selectedProduct?.emoji || "🐟")}
+            </div>
+            <label className="inline-flex cursor-pointer items-center gap-1.5 rounded-md border px-3 py-1.5 text-xs font-medium" style={{ borderColor: "#D9CBB3" }}>
+              <ImagePlus size={14} /> {uploading ? "Subiendo…" : "Foto de la subasta (opcional)"}
+              <input type="file" accept="image/*" className="hidden" onChange={handlePhoto} disabled={uploading} />
+            </label>
+          </div>
+
+          <select value={form.productId} onChange={(e) => setForm((f) => ({ ...f, productId: e.target.value }))} className="mb-2 w-full rounded border px-3 py-2 text-sm" style={{ borderColor: "#D9CBB3" }}>
+            <option value="">Elige un producto…</option>
+            {products.map((p) => {
+              const v = vendors.find((x) => x.id === p.vendorId);
+              return <option key={p.id} value={p.id}>{p.name} — {v?.name}</option>;
+            })}
+          </select>
+
+          <div className="grid grid-cols-2 gap-2">
+            <input type="number" step="0.1" placeholder="Precio máximo €" value={form.startPrice} onChange={(e) => setForm((f) => ({ ...f, startPrice: e.target.value }))} className="rounded border px-3 py-2 text-sm" style={{ borderColor: "#D9CBB3" }} />
+            <input type="number" step="0.1" placeholder="Precio mínimo €" value={form.minPrice} onChange={(e) => setForm((f) => ({ ...f, minPrice: e.target.value }))} className="rounded border px-3 py-2 text-sm" style={{ borderColor: "#D9CBB3" }} />
+          </div>
+          <div className="mt-2 grid grid-cols-2 gap-2">
+            <input type="number" step="0.1" placeholder="Baja € cada vez" value={form.stepAmount} onChange={(e) => setForm((f) => ({ ...f, stepAmount: e.target.value }))} className="rounded border px-3 py-2 text-sm" style={{ borderColor: "#D9CBB3" }} />
+            <select value={form.stepSeconds} onChange={(e) => setForm((f) => ({ ...f, stepSeconds: e.target.value }))} className="rounded border px-3 py-2 text-sm" style={{ borderColor: "#D9CBB3" }}>
+              <option value={60}>cada 1 min</option>
+              <option value={180}>cada 3 min</option>
+              <option value={300}>cada 5 min</option>
+              <option value={600}>cada 10 min</option>
+            </select>
+          </div>
+
+          {error && <p className="mt-2 text-xs font-medium" style={{ color: "#B04A2F" }}>{error}</p>}
+          <button
+            disabled={!canSubmit || submitting || uploading}
+            onClick={submit}
+            className="mt-3 w-full rounded-md py-2.5 text-sm font-semibold text-white disabled:opacity-40"
+            style={{ backgroundColor: "#E85D42" }}
+          >
+            {submitting ? "Lanzando…" : "Lanzar subasta"}
+          </button>
+        </div>
+
+        {/* Subastas activas */}
+        <div className="rounded-lg border bg-white p-4" style={{ borderColor: "#E4D9C4" }}>
+          <p className="mb-3 text-xs font-semibold">Subastas activas</p>
+          {live.length === 0 ? (
+            <p className="text-xs" style={{ color: "#5C6B6E" }}>No hay ninguna subasta en marcha.</p>
+          ) : (
+            <div className="flex flex-col gap-2">
+              {live.map((a) => {
+                const p = products.find((x) => x.id === a.productId);
+                const price = a.status === "reservada" ? a.soldPrice : computeCurrentPrice(a);
+                return (
+                  <div key={a.id} className="flex items-center gap-3 rounded-md border p-2" style={{ borderColor: "#EFEAE0" }}>
+                    <span className="text-xl">{p?.emoji || "🐟"}</span>
+                    <div className="flex-1">
+                      <p className="text-xs font-semibold">{p?.name}</p>
+                      <p className="text-[11px]" style={{ color: "#5C6B6E" }}>Máx {eur(a.startPrice)} · Mín {eur(a.minPrice)}</p>
+                    </div>
+                    <span className="text-sm font-bold" style={{ color: "#E85D42", fontFamily: "'IBM Plex Mono', monospace" }}>{eur(price)}</span>
+                    <button onClick={() => cancelAuction(a.id)} className="rounded p-1.5" style={{ color: "#B04A2F" }}><Trash2 size={14} /></button>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+          <div className="mt-4 border-t pt-3" style={{ borderColor: "#E4D9C4" }}>
+            <p className="text-[11px]" style={{ color: "#5C6B6E" }}>Ingresos por subastas vendidas</p>
+            <p className="text-lg font-bold" style={{ color: "#2F6B5E", fontFamily: "'IBM Plex Mono', monospace" }}>{eur(revenueFromAuctions)}</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function AdminView({ vendors, products, orders, auctions, createAuction, cancelAuction, setVendorStatus, setVendorCommission, addVendor }) {
   const [showNew, setShowNew] = useState(false);
   const [analytics, setAnalytics] = useState(null);
   const [analyticsLoading, setAnalyticsLoading] = useState(true);
@@ -2626,6 +3172,9 @@ function AdminView({ vendors, products, orders, setVendorStatus, setVendorCommis
 
       {/* VENTAS DIARIAS */}
       <DailySalesReport orders={orders} vendors={vendors} />
+
+      {/* SUBASTAS */}
+      <AuctionsAdminSection vendors={vendors} products={products} auctions={auctions} createAuction={createAuction} cancelAuction={cancelAuction} />
 
       {pending.length > 0 && (
         <div className="mb-8">
