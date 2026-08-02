@@ -912,23 +912,33 @@ export default function App() {
               </button>
             )}
             {user ? (
-              <button
-                onClick={() => goTo(user.role === "admin" ? "admin" : user.role === "vendedor" ? "vendor-dash" : "home")}
-                className="hidden items-center gap-1.5 rounded px-2.5 py-1.5 text-xs font-medium sm:flex"
-                style={{ color: "#F6F8F7", border: "1px solid #2A4E56" }}
-              >
-                <User size={14} /> {user.name}
-                {user.role === "comprador" && points > 0 && (
-                  <span className="ml-1 rounded-full px-1.5 py-0.5 text-[10px] font-bold" style={{ backgroundColor: "#B08900", color: "#16242A" }}>
-                    🎣 {points}
-                  </span>
-                )}
-                {user.role === "admin" && vendors.filter((v) => v.status === "pendiente").length > 0 && (
-                  <span className="ml-1 rounded-full px-1.5 py-0.5 text-[10px] font-bold text-white" style={{ backgroundColor: "#E85D42" }}>
-                    {vendors.filter((v) => v.status === "pendiente").length} pendiente{vendors.filter((v) => v.status === "pendiente").length > 1 ? "s" : ""}
-                  </span>
-                )}
-              </button>
+              <>
+                <button
+                  onClick={() => goTo(user.role === "admin" ? "admin" : user.role === "vendedor" ? "vendor-dash" : "home")}
+                  className="hidden items-center gap-1.5 rounded px-2.5 py-1.5 text-xs font-medium sm:flex"
+                  style={{ color: "#F6F8F7", border: "1px solid #2A4E56" }}
+                >
+                  <User size={14} /> {user.name}
+                  {user.role === "comprador" && points > 0 && (
+                    <span className="ml-1 rounded-full px-1.5 py-0.5 text-[10px] font-bold" style={{ backgroundColor: "#B08900", color: "#16242A" }}>
+                      🎣 {points}
+                    </span>
+                  )}
+                  {user.role === "admin" && vendors.filter((v) => v.status === "pendiente").length > 0 && (
+                    <span className="ml-1 rounded-full px-1.5 py-0.5 text-[10px] font-bold text-white" style={{ backgroundColor: "#E85D42" }}>
+                      {vendors.filter((v) => v.status === "pendiente").length} pendiente{vendors.filter((v) => v.status === "pendiente").length > 1 ? "s" : ""}
+                    </span>
+                  )}
+                </button>
+                <button
+                  onClick={logout}
+                  title="Salir"
+                  className="hidden items-center gap-1.5 rounded px-2.5 py-1.5 text-xs font-medium sm:flex"
+                  style={{ color: "#F6F8F7", border: "1px solid #2A4E56" }}
+                >
+                  <LogOut size={14} /> Salir
+                </button>
+              </>
             ) : (
               <button
                 onClick={() => goTo("login")}
@@ -967,6 +977,11 @@ export default function App() {
           <button onClick={() => goTo(user ? (user.role === "admin" ? "admin" : user.role === "vendedor" ? "vendor-dash" : "home") : "login")} style={{ color: "#F6F8F7" }}>
             <User size={20} />
           </button>
+          {user && (
+            <button onClick={logout} title="Salir" style={{ color: "#F6F8F7" }}>
+              <LogOut size={20} />
+            </button>
+          )}
         </div>
 
         {/* category nav */}
