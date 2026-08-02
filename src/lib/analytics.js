@@ -77,7 +77,9 @@ export async function fetchAnalyticsSummary(days = 30) {
     .from("analytics_events")
     .select("event_type, path, product_id, product_name, search_term, session_id, country, city, created_at")
     .gte("created_at", since)
-    .order("created_at", { ascending: true });
+    .order("created_at", { ascending: true })
+    .limit(20000); // Supabase limita a 1.000 filas por defecto; lo ampliamos
+                     // para no perder eventos recientes al crecer la analítica.
 
   if (error || !data) {
     return { visits: 0, avgMinutes: 0, topProducts: [], topSearches: [], topPlaces: [], hasAccess: !error };
