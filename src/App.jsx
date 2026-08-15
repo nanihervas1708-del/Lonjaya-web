@@ -3138,21 +3138,63 @@ function AuctionsAdminSection({ vendors, products, auctions, createAuction, canc
 /* ------------------------------------------------------------------ */
 
 /* ------------------------------------------------------------------ */
-/*  FOTOS DE PRODUCTO — cualquier vendedor, gestionado por el admin     */
+/*  PRODUCTOS — fotos y precios de cualquier vendedor, gestionado por  */
+/*  el admin                                                            */
 /* ------------------------------------------------------------------ */
 
-function ProductPhotosAdminSection({ products, vendors, upsertProduct }) {
-  const [onlyMissing, setOnlyMissing] = useState(true);
+function ProductPriceCell({ product, upsertProduct }) {
+  const [value, setValue] = useState(String(product.price));
+  const [saving, setSaving] = useState(false);
+  const dirty = Number(value) !== product.price && value !== "";
+
+  const save = async () => {
+    const num = Number(value);
+    if (!num || num <= 0) return;
+    setSaving(true);
+    try {
+      await upsertProduct({ ...product, price: num });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="flex items-center gap-1">
+      <input
+        type="number" step="0.1" value={value}
+        onChange={(e) => setValue(e.target.value)}
+        onKeyDown={(e) => e.key === "Enter" && dirty && save()}
+        className="w-20 rounded border px-1.5 py-1 text-xs"
+        style={{ borderColor: dirty ? "#E85D42" : "#D9CBB3" }}
+      />
+      <span className="text-[10px]" style={{ color: "#5C6B6E" }}>€/{product.unit}</span>
+      {dirty && (
+        <button
+          onClick={save}
+          disabled={saving}
+          className="rounded p-1"
+          style={{ color: "#2F6B5E" }}
+          title="Guardar precio"
+        >
+          {saving ? "…" : <Check size={13} />}
+        </button>
+      )}
+    </div>
+  );
+}
+
+function ProductsAdminSection({ products, vendors, upsertProduct }) {
+  const [onlyMissingPhoto, setOnlyMissingPhoto] = useState(false);
   const [vendorFilter, setVendorFilter] = useState("");
   const [uploadingId, setUploadingId] = useState(null);
   const [error, setError] = useState("");
 
   const list = useMemo(() => {
     let l = [...products];
-    if (onlyMissing) l = l.filter((p) => !p.image);
+    if (onlyMissingPhoto) l = l.filter((p) => !p.image);
     if (vendorFilter) l = l.filter((p) => p.vendorId === vendorFilter);
-    return l.sort((a, b) => (a.image ? 1 : 0) - (b.image ? 1 : 0));
-  }, [products, onlyMissing, vendorFilter]);
+    return l.sort((a, b) => a.name.localeCompare(b.name));
+  }, [products, onlyMissingPhoto, vendorFilter]);
 
   const missingCount = products.filter((p) => !p.image).length;
 
@@ -3173,16 +3215,16 @@ function ProductPhotosAdminSection({ products, vendors, upsertProduct }) {
   return (
     <div className="mb-8">
       <h2 className="mb-1 flex items-center gap-1.5 text-sm font-semibold uppercase tracking-wide" style={{ color: "#5C6B6E" }}>
-        📷 Fotos de producto
+        📷💶 Productos — fotos y precios
       </h2>
       <p className="mb-3 text-[11px]" style={{ color: "#5C6B6E" }}>
-        Sube o cambia la foto de cualquier producto de cualquier vendedor, sin tener que entrar en su cuenta.
+        Cambia la foto o el precio de cualquier producto de cualquier vendedor, sin entrar en su cuenta.
         {missingCount > 0 && <> Faltan fotos en <strong>{missingCount}</strong> producto{missingCount === 1 ? "" : "s"}.</>}
       </p>
 
       <div className="mb-3 flex flex-wrap items-center gap-2">
         <label className="flex items-center gap-1.5 text-xs" style={{ color: "#5C6B6E" }}>
-          <input type="checkbox" checked={onlyMissing} onChange={(e) => setOnlyMissing(e.target.checked)} />
+          <input type="checkbox" checked={onlyMissingPhoto} onChange={(e) => setOnlyMissingPhoto(e.target.checked)} />
           Solo sin foto
         </label>
         <select value={vendorFilter} onChange={(e) => setVendorFilter(e.target.value)} className="rounded border px-2 py-1 text-xs" style={{ borderColor: "#D9CBB3" }}>
@@ -3195,27 +3237,46 @@ function ProductPhotosAdminSection({ products, vendors, upsertProduct }) {
 
       {list.length === 0 ? (
         <p className="rounded-lg border border-dashed p-4 text-xs" style={{ borderColor: "#D9CBB3", color: "#5C6B6E" }}>
-          {onlyMissing ? "Todos los productos ya tienen foto 🎉" : "No hay productos que coincidan con el filtro."}
+          No hay productos que coincidan con el filtro.
         </p>
       ) : (
-        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6">
-          {list.map((p) => {
-            const vendor = vendors.find((v) => v.id === p.vendorId);
-            const uploading = uploadingId === p.id;
-            return (
-              <div key={p.id} className="rounded-lg border bg-white p-2" style={{ borderColor: "#E4D9C4" }}>
-                <div className="flex h-20 items-center justify-center overflow-hidden rounded-md" style={{ backgroundColor: "#EAF2EF" }}>
-                  {p.image ? <img src={p.image} alt={p.name} className="h-full w-full object-cover" /> : <span className="text-3xl">{p.emoji || "🐟"}</span>}
-                </div>
-                <p className="mt-1.5 truncate text-[11px] font-semibold" title={p.name}>{p.name}</p>
-                <p className="truncate text-[10px]" style={{ color: "#5C6B6E" }} title={vendor?.name}>{vendor?.name}</p>
-                <label className="mt-1.5 flex w-full cursor-pointer items-center justify-center gap-1 rounded-md border px-2 py-1 text-[10px] font-medium" style={{ borderColor: "#D9CBB3" }}>
-                  <ImagePlus size={11} /> {uploading ? "Subiendo…" : p.image ? "Cambiar" : "Subir foto"}
-                  <input type="file" accept="image/*" className="hidden" disabled={uploading} onChange={(e) => handleUpload(p, e.target.files?.[0])} />
-                </label>
-              </div>
-            );
-          })}
+        <div className="overflow-x-auto rounded-lg border bg-white" style={{ borderColor: "#E4D9C4" }}>
+          <table className="w-full text-xs">
+            <thead>
+              <tr style={{ backgroundColor: "#F6F8F7" }}>
+                <th className="px-3 py-2 text-left font-medium" style={{ color: "#5C6B6E" }}>Foto</th>
+                <th className="px-3 py-2 text-left font-medium" style={{ color: "#5C6B6E" }}>Producto</th>
+                <th className="px-3 py-2 text-left font-medium" style={{ color: "#5C6B6E" }}>Vendedor</th>
+                <th className="px-3 py-2 text-left font-medium" style={{ color: "#5C6B6E" }}>Precio</th>
+              </tr>
+            </thead>
+            <tbody>
+              {list.map((p) => {
+                const vendor = vendors.find((v) => v.id === p.vendorId);
+                const uploading = uploadingId === p.id;
+                return (
+                  <tr key={p.id} className="border-t" style={{ borderColor: "#EFEAE0" }}>
+                    <td className="px-3 py-2">
+                      <div className="flex items-center gap-2">
+                        <div className="flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-md" style={{ backgroundColor: "#EAF2EF" }}>
+                          {p.image ? <img src={p.image} alt={p.name} className="h-full w-full object-cover" /> : <span className="text-lg">{p.emoji || "🐟"}</span>}
+                        </div>
+                        <label className="flex cursor-pointer items-center gap-1 rounded-md border px-1.5 py-1 text-[10px] font-medium" style={{ borderColor: "#D9CBB3" }}>
+                          <ImagePlus size={11} /> {uploading ? "…" : p.image ? "Cambiar" : "Subir"}
+                          <input type="file" accept="image/*" className="hidden" disabled={uploading} onChange={(e) => handleUpload(p, e.target.files?.[0])} />
+                        </label>
+                      </div>
+                    </td>
+                    <td className="px-3 py-2 font-semibold">{p.name}</td>
+                    <td className="px-3 py-2" style={{ color: "#5C6B6E" }}>{vendor?.name}</td>
+                    <td className="px-3 py-2">
+                      <ProductPriceCell product={p} upsertProduct={upsertProduct} />
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
         </div>
       )}
     </div>
@@ -3338,8 +3399,8 @@ function AdminView({ vendors, products, orders, auctions, createAuction, cancelA
       {/* PORTADA */}
       <HeroMediaAdminSection siteSettings={siteSettings} updateSiteSettings={updateSiteSettings} />
 
-      {/* FOTOS DE PRODUCTO */}
-      <ProductPhotosAdminSection products={products} vendors={vendors} upsertProduct={upsertProduct} />
+      {/* PRODUCTOS: FOTOS Y PRECIOS */}
+      <ProductsAdminSection products={products} vendors={vendors} upsertProduct={upsertProduct} />
 
       {/* ANALÍTICA DE VISITAS */}
       <div className="mb-8">
