@@ -15,6 +15,11 @@ export const supabase = createClient(supabaseUrl, supabaseKey);
 
 const TABLE = "app_storage";
 
+// Antes usábamos NULL para las filas "compartidas" (sin dueño concreto),
+// pero eso rompía el ON CONFLICT del upsert (ver migración
+// fix_app_storage_upsert_bug). Ahora usamos este valor fijo en su lugar.
+const SHARED_MARKER = "__shared__";
+
 /**
  * Identificador de "este navegador". Como el login de la app es solo una
  * demo (sin contraseña ni backend de autenticación), usamos un id anónimo
@@ -56,17 +61,21 @@ export async function uploadProductImage(file) {
 
 export const storage = {
   async get(key, shared = false) {
-    const userId = shared ? null : getDeviceId();
-    let query = supabase.from(TABLE).select("key,value").eq("key", key).eq("shared", shared);
-    query = shared ? query.is("user_id", null) : query.eq("user_id", userId);
-    const { data, error } = await query.maybeSingle();
+    const userId = shared ? SHARED_MARKER : getDeviceId();
+    const { data, error } = await supabase
+      .from(TABLE)
+      .select("key,value")
+      .eq("key", key)
+      .eq("shared", shared)
+      .eq("user_id", userId)
+      .maybeSingle();
     if (error) throw error;
     if (!data) throw new Error("not found");
     return { key: data.key, value: data.value, shared };
   },
 
   async set(key, value, shared = false) {
-    const userId = shared ? null : getDeviceId();
+    const userId = shared ? SHARED_MARKER : getDeviceId();
     const { error } = await supabase
       .from(TABLE)
       .upsert({ key, value, shared, user_id: userId }, { onConflict: "key,shared,user_id" });
@@ -75,19 +84,20 @@ export const storage = {
   },
 
   async delete(key, shared = false) {
-    const userId = shared ? null : getDeviceId();
-    let query = supabase.from(TABLE).delete().eq("key", key).eq("shared", shared);
-    query = shared ? query.is("user_id", null) : query.eq("user_id", userId);
-    const { error } = await query;
+    const userId = shared ? SHARED_MARKER : getDeviceId();
+    const { error } = await supabase.from(TABLE).delete().eq("key", key).eq("shared", shared).eq("user_id", userId);
     if (error) throw error;
     return { key, deleted: true, shared };
   },
 
   async list(prefix = "", shared = false) {
-    const userId = shared ? null : getDeviceId();
-    let query = supabase.from(TABLE).select("key").eq("shared", shared).ilike("key", `${prefix}%`);
-    query = shared ? query.is("user_id", null) : query.eq("user_id", userId);
-    const { data, error } = await query;
+    const userId = shared ? SHARED_MARKER : getDeviceId();
+    const { data, error } = await supabase
+      .from(TABLE)
+      .select("key")
+      .eq("shared", shared)
+      .eq("user_id", userId)
+      .ilike("key", `${prefix}%`);
     if (error) throw error;
     return { keys: (data || []).map((d) => d.key), prefix, shared };
   },

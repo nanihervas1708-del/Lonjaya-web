@@ -189,7 +189,13 @@ async function loadShared(key, fallback) {
   }
 }
 async function saveShared(key, value) {
-  try { await storage.set(key, JSON.stringify(value), true); } catch {}
+  try {
+    await storage.set(key, JSON.stringify(value), true);
+    return true;
+  } catch (err) {
+    console.error(`No se pudo guardar "${key}" (compartido):`, err);
+    return false;
+  }
 }
 async function loadPersonal(key, fallback) {
   try {
@@ -200,7 +206,13 @@ async function loadPersonal(key, fallback) {
   }
 }
 async function savePersonal(key, value) {
-  try { await storage.set(key, JSON.stringify(value), false); } catch {}
+  try {
+    await storage.set(key, JSON.stringify(value), false);
+    return true;
+  } catch (err) {
+    console.error(`No se pudo guardar "${key}" (personal):`, err);
+    return false;
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -703,8 +715,16 @@ export default function App() {
       pointsEarned: earnedPoints,
     };
     const next = [order, ...orders];
+    const saved = await saveShared("lonja:orders", next);
+    if (!saved) {
+      // Ya se ha cobrado el pago (PayPal), así que no podemos fingir que no
+      // ha pasado nada: avisamos claramente y NO mostramos "confirmado" con
+      // datos que en realidad no se han guardado.
+      showToast("El pago se completó pero hubo un problema al guardar tu pedido. Contacta con nosotros indicando la hora exacta.");
+      setOrders(orders); // revertimos el estado local optimista
+      throw new Error("No se pudo guardar el pedido tras el pago");
+    }
     setOrders(next);
-    await saveShared("lonja:orders", next);
     setCart([]);
     await savePersonal("lonja:cart", []);
     const nextPoints = points + earnedPoints;
@@ -787,8 +807,12 @@ export default function App() {
       isAuction: true,
     };
     const next = [order, ...orders];
+    const saved = await saveShared("lonja:orders", next);
+    if (!saved) {
+      showToast("El pago se completó pero hubo un problema al guardar tu pedido. Contacta con nosotros indicando la hora exacta.");
+      throw new Error("No se pudo guardar el pedido tras el pago");
+    }
     setOrders(next);
-    await saveShared("lonja:orders", next);
     const nextPoints = points + earnedPoints;
     setPoints(nextPoints);
     await savePersonal("lonja:points", nextPoints);
