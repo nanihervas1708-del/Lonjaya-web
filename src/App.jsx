@@ -1290,7 +1290,6 @@ function HomeView({ products, vendors, goTo, addToCart, siteSettings }) {
               autoPlay muted={videoMuted} loop playsInline
               className="absolute inset-0 h-full w-full object-cover"
             />
-            <div className="absolute inset-0" style={{ background: "linear-gradient(120deg,rgba(14,58,69,0.88),rgba(23,63,73,0.75) 60%,rgba(31,74,69,0.55))" }} />
             <button
               onClick={() => setVideoMuted((m) => !m)}
               className="absolute right-4 top-4 z-10 flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-semibold text-white"
@@ -1301,13 +1300,22 @@ function HomeView({ products, vendors, goTo, addToCart, siteSettings }) {
           </>
         )}
         <div className="relative z-10 max-w-xl">
-          <span className="text-xs font-semibold tracking-[0.2em]" style={{ color: "#E4D9C4", fontFamily: "'IBM Plex Mono', monospace" }}>
+          <span
+            className="text-xs font-semibold tracking-[0.2em]"
+            style={{ color: "#E4D9C4", fontFamily: "'IBM Plex Mono', monospace", textShadow: heroVideoUrl ? "0 1px 6px rgba(0,0,0,0.7)" : "none" }}
+          >
             BOLETÍN DE LA LONJA — HOY
           </span>
-          <h1 className="mt-3 text-4xl leading-[1.05] sm:text-5xl" style={{ fontFamily: "'Fraunces', serif", color: "#F6F8F7", fontWeight: 600 }}>
+          <h1
+            className="mt-3 text-4xl leading-[1.05] sm:text-5xl"
+            style={{ fontFamily: "'Fraunces', serif", color: "#F6F8F7", fontWeight: 600, textShadow: heroVideoUrl ? "0 2px 10px rgba(0,0,0,0.75)" : "none" }}
+          >
             De la lonja a tu mesa, sin escalas.
           </h1>
-          <p className="mt-4 text-sm sm:text-base" style={{ color: "#C9D6D2" }}>
+          <p
+            className="mt-4 text-sm sm:text-base"
+            style={{ color: "#C9D6D2", textShadow: heroVideoUrl ? "0 1px 6px rgba(0,0,0,0.8)" : "none" }}
+          >
             Compra directo a pescaderías y lonjas de toda España. Trazabilidad de captura, precios de subasta y envío en frío en 24h.
           </p>
           <button
