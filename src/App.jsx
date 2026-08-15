@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from "react";
-import { storage, uploadProductImage } from "./lib/storage";
+import { storage, uploadProductImage, uploadSiteMedia } from "./lib/storage";
 import { trackPageView, trackProductView, trackSearch, trackHeartbeat, fetchAnalyticsSummary } from "./lib/analytics";
 import { signIn, signUpVendor, signUpBuyer, signOut, getAuthSession, onAuthChange, isVendorAccount, isBuyerAccount } from "./lib/auth";
 import { fetchVendors, fetchProducts, upsertVendorRow, bulkInsertVendors, upsertProductRow, bulkInsertProducts, deleteProductRow, decrementProductStock } from "./lib/marketplace";
@@ -377,6 +377,7 @@ export default function App() {
   const [products, setProducts] = useState([]);
   const [vendors, setVendors] = useState([]);
   const [auctions, setAuctions] = useState([]);
+  const [siteSettings, setSiteSettings] = useState({});
   const [orders, setOrders] = useState([]);
   const [cart, setCart] = useState([]);
   const [user, setUser] = useState(null);
@@ -425,6 +426,7 @@ export default function App() {
       let pts = await loadPersonal("lonja:points", 0);
       let auc = [];
       try { auc = await fetchAuctions(); } catch {}
+      let settings = await loadShared("lonja:site_settings", {});
 
       // Admin y vendedor nunca se restauran desde el almacenamiento "demo":
       // dependen de la sesión real de Supabase Auth (ver useEffect de abajo).
@@ -432,7 +434,7 @@ export default function App() {
       const sessionUser = await getAuthSession();
       setAuthUser(sessionUser);
 
-      setProducts(p); setVendors(v); setOrders(o); setCart(c); setUser(u); setPoints(pts); setAuctions(auc);
+      setProducts(p); setVendors(v); setOrders(o); setCart(c); setUser(u); setPoints(pts); setAuctions(auc); setSiteSettings(settings);
       setReady(true);
       trackPageView("home");
     })();
@@ -679,6 +681,19 @@ export default function App() {
     } catch (err) {
       showToast("No se pudo cancelar la subasta");
     }
+  };
+
+  /* -------- ajustes del sitio (solo admin): vídeo/imagen de portada -------- */
+  const updateSiteSettings = async (patch) => {
+    const next = { ...siteSettings, ...patch };
+    const saved = await saveShared("lonja:site_settings", next);
+    if (!saved) {
+      showToast("No se pudo guardar el cambio");
+      return false;
+    }
+    setSiteSettings(next);
+    showToast("Portada actualizada");
+    return true;
   };
 
   /* Alta de vendedor: solo crea la cuenta de acceso (email + contraseña).
@@ -1040,7 +1055,7 @@ export default function App() {
       {/* ---------------- MAIN ---------------- */}
       <main className="mx-auto max-w-7xl px-4 pb-24 pt-6">
         {view === "home" && (
-          <HomeView products={storefrontProducts} vendors={vendors} goTo={goTo} addToCart={addToCart} />
+          <HomeView products={storefrontProducts} vendors={vendors} goTo={goTo} addToCart={addToCart} siteSettings={siteSettings} />
         )}
         {view === "sell" && <SellerSignupView registerSeller={registerSeller} categories={CATEGORIES} goTo={goTo} />}
         {view === "catalog" && (
@@ -1110,6 +1125,8 @@ export default function App() {
             setVendorStatus={setVendorStatus}
             setVendorCommission={setVendorCommission}
             addVendor={addVendor}
+            siteSettings={siteSettings}
+            updateSiteSettings={updateSiteSettings}
           />
         )}
       </main>
@@ -1243,7 +1260,7 @@ function ProductCard({ product, vendor, onOpen, onAdd }) {
 /*  HOME                                                                */
 /* ------------------------------------------------------------------ */
 
-function HomeView({ products, vendors, goTo, addToCart }) {
+function HomeView({ products, vendors, goTo, addToCart, siteSettings }) {
   const featured = products.filter((p) => p.freshness === "hoy").slice(0, 8);
   const vendorOf = (id) => vendors.find((v) => v.id === id);
   const countdown = useMarketCountdown();
@@ -1251,6 +1268,12 @@ function HomeView({ products, vendors, goTo, addToCart }) {
   // (compareAtPrice > price) — nunca un porcentaje inventado por la web.
   const flashProducts = products.filter((p) => p.compareAtPrice && p.compareAtPrice > p.price);
   const topVendors = [...vendors].filter((v) => v.status === "activo").sort((a, b) => b.rating - a.rating).slice(0, 3);
+  const heroVideoUrl = siteSettings?.heroVideoUrl;
+  const [videoMuted, setVideoMuted] = useState(true);
+  const heroVideoRef = useRef(null);
+  useEffect(() => {
+    if (heroVideoRef.current) heroVideoRef.current.muted = videoMuted;
+  }, [videoMuted]);
 
   return (
     <div className="flex flex-col gap-12">
@@ -1259,6 +1282,24 @@ function HomeView({ products, vendors, goTo, addToCart }) {
         className="relative overflow-hidden rounded-xl px-6 py-12 sm:px-12 sm:py-16"
         style={{ background: "linear-gradient(120deg,#0E3A45,#173F49 60%,#1F4A45)" }}
       >
+        {heroVideoUrl && (
+          <>
+            <video
+              ref={heroVideoRef}
+              src={heroVideoUrl}
+              autoPlay muted={videoMuted} loop playsInline
+              className="absolute inset-0 h-full w-full object-cover"
+            />
+            <div className="absolute inset-0" style={{ background: "linear-gradient(120deg,rgba(14,58,69,0.88),rgba(23,63,73,0.75) 60%,rgba(31,74,69,0.55))" }} />
+            <button
+              onClick={() => setVideoMuted((m) => !m)}
+              className="absolute right-4 top-4 z-10 flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-semibold text-white"
+              style={{ backgroundColor: "rgba(0,0,0,0.45)" }}
+            >
+              {videoMuted ? <>🔇 Activar sonido</> : <>🔊 Silenciar</>}
+            </button>
+          </>
+        )}
         <div className="relative z-10 max-w-xl">
           <span className="text-xs font-semibold tracking-[0.2em]" style={{ color: "#E4D9C4", fontFamily: "'IBM Plex Mono', monospace" }}>
             BOLETÍN DE LA LONJA — HOY
@@ -1277,7 +1318,9 @@ function HomeView({ products, vendors, goTo, addToCart }) {
             Ver la lonja de hoy <ChevronRight size={16} />
           </button>
         </div>
-        <div className="pointer-events-none absolute -right-6 -top-6 select-none text-[180px] opacity-10 sm:text-[240px]">🐟</div>
+        {!heroVideoUrl && (
+          <div className="pointer-events-none absolute -right-6 -top-6 select-none text-[180px] opacity-10 sm:text-[240px]">🐟</div>
+        )}
       </section>
 
       {/* TRUST BAR */}
@@ -3081,7 +3124,81 @@ function AuctionsAdminSection({ vendors, products, auctions, createAuction, canc
   );
 }
 
-function AdminView({ vendors, products, orders, auctions, createAuction, cancelAuction, setVendorStatus, setVendorCommission, addVendor }) {
+/* ------------------------------------------------------------------ */
+/*  PORTADA — VÍDEO DE FONDO DEL HERO                                   */
+/* ------------------------------------------------------------------ */
+
+function HeroMediaAdminSection({ siteSettings, updateSiteSettings }) {
+  const [uploading, setUploading] = useState(false);
+  const [error, setError] = useState("");
+  const currentUrl = siteSettings?.heroVideoUrl;
+
+  const handleUpload = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (!file.type.startsWith("video/")) {
+      setError("Tiene que ser un archivo de vídeo (mp4, mov...).");
+      return;
+    }
+    setError("");
+    setUploading(true);
+    try {
+      const url = await uploadSiteMedia(file);
+      await updateSiteSettings({ heroVideoUrl: url });
+    } catch (err) {
+      setError("No se pudo subir el vídeo. Comprueba que no pese demasiado (máx. 100MB).");
+    } finally {
+      setUploading(false);
+      e.target.value = "";
+    }
+  };
+
+  const removeVideo = async () => {
+    await updateSiteSettings({ heroVideoUrl: null });
+  };
+
+  return (
+    <div className="mb-8">
+      <h2 className="mb-1 flex items-center gap-1.5 text-sm font-semibold uppercase tracking-wide" style={{ color: "#5C6B6E" }}>
+        🎬 Portada de la web
+      </h2>
+      <p className="mb-3 text-[11px]" style={{ color: "#5C6B6E" }}>
+        Vídeo de fondo de la cabecera de inicio (se reproduce en bucle, sin sonido). Formatos habituales: MP4, MOV.
+      </p>
+      <div className="rounded-lg border bg-white p-4" style={{ borderColor: "#E4D9C4" }}>
+        {currentUrl ? (
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+            <video src={currentUrl} muted loop autoPlay playsInline className="h-28 w-48 rounded-md object-cover" />
+            <div className="flex-1">
+              <p className="text-xs font-semibold" style={{ color: "#2F6B5E" }}>Vídeo activo en portada</p>
+              <p className="mt-1 text-[11px]" style={{ color: "#5C6B6E" }}>Sube otro archivo para sustituirlo.</p>
+            </div>
+            <div className="flex gap-2">
+              <label className="inline-flex cursor-pointer items-center gap-1.5 rounded-md border px-3 py-1.5 text-xs font-medium" style={{ borderColor: "#D9CBB3" }}>
+                <ImagePlus size={14} /> {uploading ? "Subiendo…" : "Sustituir"}
+                <input type="file" accept="video/*" className="hidden" onChange={handleUpload} disabled={uploading} />
+              </label>
+              <button onClick={removeVideo} className="rounded-md border px-3 py-1.5 text-xs font-medium" style={{ borderColor: "#D9CBB3", color: "#B04A2F" }}>
+                Quitar
+              </button>
+            </div>
+          </div>
+        ) : (
+          <label className="flex cursor-pointer flex-col items-center gap-2 rounded-md border border-dashed py-8 text-center" style={{ borderColor: "#D9CBB3" }}>
+            <ImagePlus size={22} color="#5C6B6E" />
+            <span className="text-xs font-medium" style={{ color: "#5C6B6E" }}>
+              {uploading ? "Subiendo…" : "Todavía no hay vídeo — sube el de la lonja de Isla Cristina (o el que sea) aquí"}
+            </span>
+            <input type="file" accept="video/*" className="hidden" onChange={handleUpload} disabled={uploading} />
+          </label>
+        )}
+        {error && <p className="mt-2 text-xs font-medium" style={{ color: "#B04A2F" }}>{error}</p>}
+      </div>
+    </div>
+  );
+}
+
+function AdminView({ vendors, products, orders, auctions, createAuction, cancelAuction, setVendorStatus, setVendorCommission, addVendor, siteSettings, updateSiteSettings }) {
   const [showNew, setShowNew] = useState(false);
   const [analytics, setAnalytics] = useState(null);
   const [analyticsLoading, setAnalyticsLoading] = useState(true);
@@ -3123,6 +3240,9 @@ function AdminView({ vendors, products, orders, auctions, createAuction, cancelA
         <StatCard icon={TrendingUp} label="Ventas totales (GMV)" value={eur(totalRevenue)} />
         <StatCard icon={ShieldCheck} label="Comisión generada" value={eur(totalCommission)} />
       </div>
+
+      {/* PORTADA */}
+      <HeroMediaAdminSection siteSettings={siteSettings} updateSiteSettings={updateSiteSettings} />
 
       {/* ANALÍTICA DE VISITAS */}
       <div className="mb-8">

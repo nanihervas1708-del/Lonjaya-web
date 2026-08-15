@@ -59,6 +59,23 @@ export async function uploadProductImage(file) {
   return data.publicUrl;
 }
 
+/**
+ * Sube un archivo de "medios del sitio" (vídeo o imagen de portada) al
+ * bucket público "site-media". Solo el admin puede escribir aquí (lo
+ * protege la política de seguridad, no solo el código).
+ */
+export async function uploadSiteMedia(file) {
+  const ext = file.name.split(".").pop();
+  const path = `${crypto.randomUUID()}.${ext}`;
+  const { error } = await supabase.storage.from("site-media").upload(path, file, {
+    cacheControl: "3600",
+    upsert: false,
+  });
+  if (error) throw error;
+  const { data } = supabase.storage.from("site-media").getPublicUrl(path);
+  return data.publicUrl;
+}
+
 export const storage = {
   async get(key, shared = false) {
     const userId = shared ? SHARED_MARKER : getDeviceId();
