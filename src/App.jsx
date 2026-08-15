@@ -1055,7 +1055,7 @@ export default function App() {
       {/* ---------------- MAIN ---------------- */}
       <main className="mx-auto max-w-7xl px-4 pb-24 pt-6">
         {view === "home" && (
-          <HomeView products={storefrontProducts} vendors={vendors} goTo={goTo} addToCart={addToCart} siteSettings={siteSettings} />
+          <HomeView products={storefrontProducts} vendors={vendors} goTo={goTo} addToCart={addToCart} siteSettings={siteSettings} setFilters={setFilters} />
         )}
         {view === "sell" && <SellerSignupView registerSeller={registerSeller} categories={CATEGORIES} goTo={goTo} />}
         {view === "catalog" && (
@@ -1261,7 +1261,7 @@ function ProductCard({ product, vendor, onOpen, onAdd }) {
 /*  HOME                                                                */
 /* ------------------------------------------------------------------ */
 
-function HomeView({ products, vendors, goTo, addToCart, siteSettings }) {
+function HomeView({ products, vendors, goTo, addToCart, siteSettings, setFilters }) {
   const featured = products.filter((p) => p.freshness === "hoy").slice(0, 8);
   const vendorOf = (id) => vendors.find((v) => v.id === id);
   const countdown = useMarketCountdown();
@@ -1461,7 +1461,15 @@ function HomeView({ products, vendors, goTo, addToCart, siteSettings }) {
             <p className="mb-4 text-xs" style={{ color: "#5C6B6E" }}>{t.blurb}</p>
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
               {group.map((v) => (
-                <div key={v.id} className="rounded-lg border bg-white p-4" style={{ borderColor: "#E4D9C4" }}>
+                <button
+                  key={v.id}
+                  onClick={() => {
+                    setFilters((f) => ({ ...f, vendor: v.id, vendorType: "all" }));
+                    goTo("catalog", { category: null });
+                  }}
+                  className="rounded-lg border bg-white p-4 text-left transition-shadow hover:shadow-md"
+                  style={{ borderColor: "#E4D9C4" }}
+                >
                   <div className="flex items-center gap-2">
                     <Store size={16} color="#0E3A45" />
                     <h3 className="font-semibold" style={{ fontFamily: "'Fraunces', serif" }}>{v.name}</h3>
@@ -1471,10 +1479,15 @@ function HomeView({ products, vendors, goTo, addToCart, siteSettings }) {
                     <MapPin size={12} /> {v.location} · desde {v.since}
                   </p>
                   <p className="mt-2 text-xs" style={{ color: "#5C6B6E" }}>{v.bio}</p>
-                  <div className="mt-3 flex items-center gap-1 text-xs font-semibold" style={{ color: "#B08900" }}>
-                    <Star size={13} fill="#B08900" /> {v.rating || "Nuevo"}
+                  <div className="mt-3 flex items-center justify-between">
+                    <div className="flex items-center gap-1 text-xs font-semibold" style={{ color: "#B08900" }}>
+                      <Star size={13} fill="#B08900" /> {v.rating || "Nuevo"}
+                    </div>
+                    <span className="flex items-center gap-0.5 text-xs font-semibold" style={{ color: "#2F6B5E" }}>
+                      Ver productos <ChevronRight size={13} />
+                    </span>
                   </div>
-                </div>
+                </button>
               ))}
             </div>
           </section>
