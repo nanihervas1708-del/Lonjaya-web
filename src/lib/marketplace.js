@@ -110,6 +110,16 @@ export async function fetchProducts() {
   return (data || []).map(rowToProduct);
 }
 
+/** Búsqueda tolerante a errores tipográficos y acentos (usa pg_trgm en la
+ * base de datos). Se usa como refuerzo cuando la búsqueda normal (en el
+ * propio navegador) no encuentra nada, para no perder ventas por un
+ * "bogabantesmarisvo" en vez de "bogavante marisco". */
+export async function searchProductsFuzzy(query) {
+  const { data, error } = await supabase.rpc("search_products_fuzzy", { p_query: query, p_limit: 40 });
+  if (error) throw error;
+  return (data || []).map(rowToProduct);
+}
+
 export async function upsertProductRow(product) {
   const { error } = await supabase.from("products").upsert(productToRow(product));
   if (error) throw error;

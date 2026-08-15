@@ -2,8 +2,11 @@ import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import { storage, uploadProductImage, uploadSiteMedia } from "./lib/storage";
 import { trackPageView, trackProductView, trackSearch, trackHeartbeat, fetchAnalyticsSummary } from "./lib/analytics";
 import { signIn, signUpVendor, signUpBuyer, signOut, getAuthSession, onAuthChange, isVendorAccount, isBuyerAccount } from "./lib/auth";
-import { fetchVendors, fetchProducts, upsertVendorRow, bulkInsertVendors, upsertProductRow, bulkInsertProducts, deleteProductRow, decrementProductStock } from "./lib/marketplace";
+import { fetchVendors, fetchProducts, upsertVendorRow, bulkInsertVendors, upsertProductRow, bulkInsertProducts, deleteProductRow, decrementProductStock, searchProductsFuzzy } from "./lib/marketplace";
 import { fetchAuctions, createAuctionRow, cancelAuctionRow, computeCurrentPrice, reserveAuction, confirmAuctionSale, releaseAuctionReservation } from "./lib/auctions";
+import { fetchReviews, submitReview, vendorAverageRating } from "./lib/reviews";
+import { createProductAlert, registerReferral, completeReferralIfAny, logCheckoutAttempt, markCheckoutConverted, claimPendingBonusPoints } from "./lib/alerts";
+import { isPushSupported, subscribeToPush, unsubscribeFromPush, sendPushNotification } from "./lib/push";
 import { sendEmail, sendAdminNotification, buildOrderConfirmationEmail, buildVendorNewOrderEmail, buildAdminNewVendorEmail } from "./lib/emails";
 import { marked } from "marked";
 import { LEGAL_DOCS } from "./lib/legalContent";
@@ -40,6 +43,11 @@ const LOYALTY_CONFIG = {
   rewardThreshold: 500,  // puntos necesarios para el siguiente descuento
   rewardValue: 5,        // € de descuento que se consiguen cada "rewardThreshold" puntos
 };
+
+// Puntos de regalo por "participar" (no por comprar): dejar una reseña,
+// o que alguien a quien has invitado haga su primer pedido.
+const REVIEW_REWARD_POINTS = 30;
+const REFERRAL_REWARD_POINTS = 100;
 
 /**
  * Información del socio logístico. Se muestra en checkout, ficha de
@@ -378,6 +386,7 @@ export default function App() {
   const [vendors, setVendors] = useState([]);
   const [auctions, setAuctions] = useState([]);
   const [siteSettings, setSiteSettings] = useState({});
+  const [reviews, setReviews] = useState([]);
   const [orders, setOrders] = useState([]);
   const [cart, setCart] = useState([]);
   const [user, setUser] = useState(null);
@@ -427,6 +436,8 @@ export default function App() {
       let auc = [];
       try { auc = await fetchAuctions(); } catch {}
       let settings = await loadShared("lonja:site_settings", {});
+      let rv = [];
+      try { rv = await fetchReviews(); } catch {}
 
       // Admin y vendedor nunca se restauran desde el almacenamiento "demo":
       // dependen de la sesión real de Supabase Auth (ver useEffect de abajo).
@@ -434,7 +445,7 @@ export default function App() {
       const sessionUser = await getAuthSession();
       setAuthUser(sessionUser);
 
-      setProducts(p); setVendors(v); setOrders(o); setCart(c); setUser(u); setPoints(pts); setAuctions(auc); setSiteSettings(settings);
+      setProducts(p); setVendors(v); setOrders(o); setCart(c); setUser(u); setPoints(pts); setAuctions(auc); setSiteSettings(settings); setReviews(rv);
       setReady(true);
       trackPageView("home");
     })();
@@ -467,6 +478,16 @@ export default function App() {
     } else if (isBuyerAccount(authUser)) {
       const meta = authUser.user_metadata || {};
       setUser({ name: meta.name || authUser.email, role: "comprador", email: authUser.email, phone: meta.phone || "" });
+      claimPendingBonusPoints(authUser.email).then((bonus) => {
+        if (bonus > 0) {
+          setPoints((prev) => {
+            const next = prev + bonus;
+            savePersonal("lonja:points", next);
+            return next;
+          });
+          showToast(`¡Has recibido ${bonus} puntos LonjaYa de regalo! 🎣`);
+        }
+      }).catch(() => {});
     } else {
       setUser({ name: authUser.email, role: "admin", vendorId: null });
     }
@@ -549,6 +570,10 @@ export default function App() {
 
   const registerBuyer = async ({ name, email, phone, password }) => {
     await signUpBuyer(email, password, { name, phone });
+    const ref = new URLSearchParams(window.location.search).get("ref");
+    if (ref) {
+      try { await registerReferral(decodeURIComponent(ref), email); } catch {}
+    }
   };
 
   // Admin y vendedor: acceso real con email + contraseña vía Supabase Auth.
@@ -613,11 +638,19 @@ export default function App() {
   /* -------- vendor product CRUD (tabla real, protegida por RLS) -------- */
   const upsertProduct = async (prod) => {
     try {
+      const previous = products.find((p) => p.id === prod.id);
       await upsertProductRow(prod);
       setProducts((prev) => {
         const exists = prev.some((p) => p.id === prod.id);
         return exists ? prev.map((p) => (p.id === prod.id ? prod : p)) : [...prev, prod];
       });
+      if (previous && previous.stock <= 0 && prod.stock > 0) {
+        fetch("/.netlify/functions/notify-stock-alerts", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ productId: prod.id }),
+        }).catch(() => {});
+      }
       showToast("Producto guardado");
     } catch (err) {
       showToast("No se pudo guardar el producto");
@@ -771,6 +804,19 @@ export default function App() {
     }
 
     goTo("confirm", {});
+
+    // Si era su primer pedido, comprueba si vino invitado por alguien y
+    // reparte la recompensa (a él y a quien le invitó).
+    const isFirstOrder = !orders.some((o) => o.shippingAddress?.email === shippingAddress.email);
+    if (isFirstOrder) {
+      fetch("/.netlify/functions/complete-referral", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ referredEmail: shippingAddress.email }),
+      }).catch(() => {});
+    }
+    markCheckoutConverted(shippingAddress.email);
+
     return order;
   };
 
@@ -848,6 +894,28 @@ export default function App() {
     return order;
   };
 
+  /* -------- reseñas de compradores -------- */
+  const addReview = async ({ orderId, productId, vendorId, rating, comment }) => {
+    try {
+      await submitReview({
+        orderId, productId, vendorId, rating, comment,
+        buyerEmail: user?.email, buyerName: user?.name,
+      });
+      setReviews((prev) => [
+        { id: "tmp" + Date.now(), orderId, productId, vendorId, rating, comment, buyerEmail: user?.email, buyerName: user?.name, createdAt: new Date().toISOString() },
+        ...prev,
+      ]);
+      const nextPoints = points + REVIEW_REWARD_POINTS;
+      setPoints(nextPoints);
+      await savePersonal("lonja:points", nextPoints);
+      showToast(`¡Gracias por tu valoración! +${REVIEW_REWARD_POINTS} puntos LonjaYa 🎣`);
+      return true;
+    } catch (err) {
+      showToast(String(err.message || "").includes("duplicate") ? "Ya habías valorado este producto" : "No se pudo guardar la valoración");
+      return false;
+    }
+  };
+
   /* -------- derived: only show products from approved, active vendors -------- */
   const storefrontProducts = useMemo(() => {
     const activeIds = new Set(vendors.filter((v) => v.status === "activo").map((v) => v.id));
@@ -860,12 +928,38 @@ export default function App() {
   }, [products, vendors, auctions]);
 
   /* -------- derived: filtered catalog -------- */
+  const [fuzzyResults, setFuzzyResults] = useState(null); // { forQuery, products } | null
+  useEffect(() => {
+    const q = searchQuery.trim();
+    if (q.length < 3) { setFuzzyResults(null); return; }
+    const localMatch = storefrontProducts.some((p) => p.name.toLowerCase().includes(q.toLowerCase()) || p.origin.toLowerCase().includes(q.toLowerCase()));
+    if (localMatch) { setFuzzyResults(null); return; }
+    const timer = setTimeout(async () => {
+      try {
+        const results = await searchProductsFuzzy(q);
+        const activeIds = new Set(storefrontProducts.map((p) => p.id));
+        setFuzzyResults({ forQuery: q, products: results.filter((p) => activeIds.has(p.id)) });
+      } catch {
+        setFuzzyResults(null);
+      }
+    }, 350); // pequeña espera para no lanzar una consulta en cada tecla
+    return () => clearTimeout(timer);
+  }, [searchQuery, storefrontProducts]);
+
   const filteredProducts = useMemo(() => {
     let list = [...storefrontProducts];
     if (activeCategory) list = list.filter((p) => p.category === activeCategory);
     if (searchQuery.trim()) {
       const q = searchQuery.toLowerCase();
-      list = list.filter((p) => p.name.toLowerCase().includes(q) || p.origin.toLowerCase().includes(q));
+      const directMatches = list.filter((p) => p.name.toLowerCase().includes(q) || p.origin.toLowerCase().includes(q));
+      if (directMatches.length > 0) {
+        list = directMatches;
+      } else if (fuzzyResults?.forQuery === searchQuery.trim()) {
+        // Ningún resultado exacto: usamos la búsqueda tolerante a errores tipográficos.
+        list = fuzzyResults.products;
+      } else {
+        list = [];
+      }
     }
     if (filters.vendor !== "all") list = list.filter((p) => p.vendorId === filters.vendor);
     if (filters.vendorType && filters.vendorType !== "all") {
@@ -877,7 +971,7 @@ export default function App() {
     if (filters.sort === "price-desc") list.sort((a, b) => b.price - a.price);
     if (filters.sort === "name") list.sort((a, b) => a.name.localeCompare(b.name));
     return list;
-  }, [storefrontProducts, activeCategory, searchQuery, filters, vendors]);
+  }, [storefrontProducts, activeCategory, searchQuery, filters, vendors, fuzzyResults]);
 
   const activeProduct = products.find((p) => p.id === activeProductId);
   const vendorOf = (id) => vendors.find((v) => v.id === id);
@@ -953,7 +1047,7 @@ export default function App() {
             {user ? (
               <>
                 <button
-                  onClick={() => goTo(user.role === "admin" ? "admin" : user.role === "vendedor" ? "vendor-dash" : "home")}
+                  onClick={() => goTo(user.role === "admin" ? "admin" : user.role === "vendedor" ? "vendor-dash" : "mis-pedidos")}
                   className="hidden items-center gap-1.5 rounded px-2.5 py-1.5 text-xs font-medium sm:flex"
                   style={{ color: "#F6F8F7", border: "1px solid #2A4E56" }}
                 >
@@ -1013,7 +1107,7 @@ export default function App() {
               className="w-full bg-transparent px-2 text-sm outline-none"
             />
           </div>
-          <button onClick={() => goTo(user ? (user.role === "admin" ? "admin" : user.role === "vendedor" ? "vendor-dash" : "home") : "login")} style={{ color: "#F6F8F7" }}>
+          <button onClick={() => goTo(user ? (user.role === "admin" ? "admin" : user.role === "vendedor" ? "vendor-dash" : "mis-pedidos") : "login")} style={{ color: "#F6F8F7" }}>
             <User size={20} />
           </button>
           {user && (
@@ -1055,7 +1149,7 @@ export default function App() {
       {/* ---------------- MAIN ---------------- */}
       <main className="mx-auto max-w-7xl px-4 pb-24 pt-6">
         {view === "home" && (
-          <HomeView products={storefrontProducts} vendors={vendors} goTo={goTo} addToCart={addToCart} siteSettings={siteSettings} setFilters={setFilters} />
+          <HomeView products={storefrontProducts} vendors={vendors} goTo={goTo} addToCart={addToCart} siteSettings={siteSettings} setFilters={setFilters} reviews={reviews} />
         )}
         {view === "sell" && <SellerSignupView registerSeller={registerSeller} categories={CATEGORIES} goTo={goTo} />}
         {view === "catalog" && (
@@ -1077,6 +1171,7 @@ export default function App() {
             vendors={vendors}
             addToCart={addToCart}
             goTo={goTo}
+            user={user}
           />
         )}
         {view === "cart" && (
@@ -1100,6 +1195,7 @@ export default function App() {
           />
         )}
         {view === "confirm" && <ConfirmView goTo={goTo} order={lastOrder} totalPoints={points} />}
+        {view === "mis-pedidos" && <MyOrdersView orders={orders} user={user} reviews={reviews} addReview={addReview} goTo={goTo} showToast={showToast} />}
         {view.startsWith("legal-") && <LegalPageView docId={view.replace("legal-", "")} goTo={goTo} />}
         {view === "contacto" && <ContactFormView goTo={goTo} />}
         {view === "login" && <LoginView loginBuyer={loginBuyer} loginAdmin={loginAdmin} loginVendor={loginVendor} goTo={goTo} />}
@@ -1261,7 +1357,7 @@ function ProductCard({ product, vendor, onOpen, onAdd }) {
 /*  HOME                                                                */
 /* ------------------------------------------------------------------ */
 
-function HomeView({ products, vendors, goTo, addToCart, siteSettings, setFilters }) {
+function HomeView({ products, vendors, goTo, addToCart, siteSettings, setFilters, reviews }) {
   const featured = products.filter((p) => p.freshness === "hoy").slice(0, 8);
   const vendorOf = (id) => vendors.find((v) => v.id === id);
   const countdown = useMarketCountdown();
@@ -1481,7 +1577,10 @@ function HomeView({ products, vendors, goTo, addToCart, siteSettings, setFilters
                   <p className="mt-2 text-xs" style={{ color: "#5C6B6E" }}>{v.bio}</p>
                   <div className="mt-3 flex items-center justify-between">
                     <div className="flex items-center gap-1 text-xs font-semibold" style={{ color: "#B08900" }}>
-                      <Star size={13} fill="#B08900" /> {v.rating || "Nuevo"}
+                      {(() => {
+                        const real = vendorAverageRating(reviews, v.id);
+                        return real ? <><Star size={13} fill="#B08900" /> {real.average} ({real.count})</> : <><Star size={13} fill="#B08900" /> {v.rating || "Nuevo"}</>;
+                      })()}
                     </div>
                     <span className="flex items-center gap-0.5 text-xs font-semibold" style={{ color: "#2F6B5E" }}>
                       Ver productos <ChevronRight size={13} />
@@ -1597,7 +1696,43 @@ function CatalogView({ products, vendors, activeCategory, filters, setFilters, g
 /*  PRODUCT DETAIL                                                      */
 /* ------------------------------------------------------------------ */
 
-function ProductView({ product, vendor, allProducts, vendors, addToCart, goTo }) {
+function StockAlertBox({ product, user }) {
+  const [email, setEmail] = useState(user?.email || "");
+  const [sent, setSent] = useState(false);
+  const [sending, setSending] = useState(false);
+
+  if (sent) {
+    return (
+      <p className="mt-3 rounded-md border p-2.5 text-xs font-medium" style={{ borderColor: "#2F6B5E", color: "#2F6B5E", backgroundColor: "#2F6B5E10" }}>
+        ✓ Te avisaremos por email en cuanto vuelva a haber stock.
+      </p>
+    );
+  }
+  return (
+    <div className="mt-3 rounded-md border p-3" style={{ borderColor: "#D9CBB3" }}>
+      <p className="mb-2 text-xs font-medium">🔔 Avísame cuando vuelva a haber stock</p>
+      <div className="flex gap-2">
+        <input
+          type="email" placeholder="Tu email" value={email} onChange={(e) => setEmail(e.target.value)}
+          className="flex-1 rounded border px-2 py-1.5 text-xs" style={{ borderColor: "#D9CBB3" }}
+        />
+        <button
+          disabled={!email.includes("@") || sending}
+          onClick={async () => {
+            setSending(true);
+            try { await createProductAlert(product.id, email, "back_in_stock"); setSent(true); } finally { setSending(false); }
+          }}
+          className="rounded-md px-3 py-1.5 text-xs font-semibold text-white disabled:opacity-40"
+          style={{ backgroundColor: "#0E3A45" }}
+        >
+          {sending ? "…" : "Avisarme"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function ProductView({ product, vendor, allProducts, vendors, addToCart, goTo, user }) {
   const [qty, setQty] = useState(1);
   const { rating, count } = productReviews(product.id);
 
@@ -1656,6 +1791,8 @@ function ProductView({ product, vendor, allProducts, vendors, addToCart, goTo })
               {product.stock <= 0 ? "Agotado" : <><ShoppingCart size={16} /> Añadir a la cesta</>}
             </button>
           </div>
+
+          {product.stock <= 0 && <StockAlertBox product={product} user={user} />}
 
           {vendor && (
             <div className="mt-8 rounded-lg border p-4" style={{ borderColor: "#E4D9C4" }}>
@@ -1948,6 +2085,14 @@ function CheckoutView({ lines, total, user, placeOrder, goTo }) {
   const weightKg = cartWeightKg(lines);
   const shipping = shippingCostForWeight(weightKg);
   const grandTotal = total + shipping;
+
+  useEffect(() => {
+    if (user?.role === "comprador" && user?.email && lines.length > 0) {
+      logCheckoutAttempt(user.email, user.name, lines.map((l) => ({ name: l.product.name, qty: l.qty })));
+    }
+    // Solo al entrar al checkout, no en cada cambio de la cesta.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   if (user?.role !== "comprador") {
     return (
@@ -2292,6 +2437,180 @@ function ContactFormView({ goTo }) {
   );
 }
 
+/* ------------------------------------------------------------------ */
+/*  MIS PEDIDOS (comprador) — con opción de valorar                     */
+/* ------------------------------------------------------------------ */
+
+function StarPicker({ value, onChange }) {
+  return (
+    <div className="flex items-center gap-0.5">
+      {[1, 2, 3, 4, 5].map((n) => (
+        <button key={n} type="button" onClick={() => onChange(n)}>
+          <Star size={18} fill={n <= value ? "#B08900" : "none"} color="#B08900" />
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function ReviewForm({ line, order, reviews, user, addReview }) {
+  const alreadyReviewed = reviews.some((r) => r.orderId === order.id && r.productId === line.productId && r.buyerEmail === user?.email);
+  const [rating, setRating] = useState(5);
+  const [comment, setComment] = useState("");
+  const [open, setOpen] = useState(false);
+  const [sending, setSending] = useState(false);
+
+  if (alreadyReviewed) {
+    return <p className="mt-1 text-[11px] font-medium" style={{ color: "#2F6B5E" }}>✓ Ya valoraste este producto</p>;
+  }
+  if (!open) {
+    return (
+      <button onClick={() => setOpen(true)} className="mt-1 text-[11px] font-semibold underline" style={{ color: "#2F6B5E" }}>
+        Valorar este producto
+      </button>
+    );
+  }
+  return (
+    <div className="mt-2 rounded-md border p-3" style={{ borderColor: "#E4D9C4" }}>
+      <StarPicker value={rating} onChange={setRating} />
+      <textarea
+        placeholder="¿Qué tal el producto? (opcional)"
+        value={comment} onChange={(e) => setComment(e.target.value)}
+        rows={2}
+        className="mt-2 w-full rounded border px-2 py-1.5 text-xs"
+        style={{ borderColor: "#D9CBB3" }}
+      />
+      <button
+        disabled={sending}
+        onClick={async () => {
+          setSending(true);
+          const ok = await addReview({ orderId: order.id, productId: line.productId, vendorId: line.vendorId, rating, comment });
+          setSending(false);
+          if (ok) setOpen(false);
+        }}
+        className="mt-2 rounded-md px-3 py-1.5 text-xs font-semibold text-white disabled:opacity-50"
+        style={{ backgroundColor: "#E85D42" }}
+      >
+        {sending ? "Enviando…" : "Enviar valoración"}
+      </button>
+    </div>
+  );
+}
+
+function ReferralBox({ user }) {
+  const [copied, setCopied] = useState(false);
+  const link = `https://lonjaya.com/?ref=${encodeURIComponent(user?.email || "")}`;
+
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(link);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {}
+  };
+
+  return (
+    <div className="mb-5 rounded-lg border p-4" style={{ borderColor: "#B08900", backgroundColor: "#B0890010" }}>
+      <p className="text-sm font-semibold" style={{ color: "#8A6A00" }}>🎁 Invita a un amigo</p>
+      <p className="mt-1 text-xs" style={{ color: "#5C6B6E" }}>
+        Cuando alguien se registre con tu enlace y haga su primer pedido, ganáis <strong>{REFERRAL_REWARD_POINTS} puntos LonjaYa</strong> cada uno.
+      </p>
+      <div className="mt-2 flex gap-2">
+        <input readOnly value={link} className="flex-1 rounded border bg-white px-2 py-1.5 text-xs" style={{ borderColor: "#D9CBB3" }} onClick={(e) => e.target.select()} />
+        <button onClick={copy} className="shrink-0 rounded-md px-3 py-1.5 text-xs font-semibold text-white" style={{ backgroundColor: "#0E3A45" }}>
+          {copied ? "¡Copiado!" : "Copiar"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function PushNotificationsBox({ user, showToast }) {
+  const [subscribed, setSubscribed] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const vapidKey = import.meta.env.VITE_VAPID_PUBLIC_KEY;
+
+  if (!isPushSupported() || !vapidKey) return null;
+
+  const toggle = async () => {
+    setBusy(true);
+    try {
+      if (subscribed) {
+        await unsubscribeFromPush();
+        setSubscribed(false);
+        showToast("Notificaciones desactivadas");
+      } else {
+        await subscribeToPush(user.email, vapidKey);
+        setSubscribed(true);
+        showToast("¡Notificaciones activadas!");
+      }
+    } catch (err) {
+      showToast(err.message || "No se pudo activar las notificaciones");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="mb-5 flex items-center justify-between rounded-lg border p-4" style={{ borderColor: "#E4D9C4" }}>
+      <div>
+        <p className="text-sm font-semibold">🔔 Notificaciones de pedidos</p>
+        <p className="text-xs" style={{ color: "#5C6B6E" }}>Avisos en tu móvil/ordenador cuando cambie el estado de tus pedidos.</p>
+      </div>
+      <button
+        disabled={busy}
+        onClick={toggle}
+        className="shrink-0 rounded-md border px-3 py-1.5 text-xs font-semibold disabled:opacity-50"
+        style={{ borderColor: "#D9CBB3" }}
+      >
+        {busy ? "…" : subscribed ? "Desactivar" : "Activar"}
+      </button>
+    </div>
+  );
+}
+
+function MyOrdersView({ orders, user, reviews, addReview, goTo, showToast }) {
+  const myOrders = orders.filter((o) => o.shippingAddress?.email === user?.email);
+
+  return (
+    <div className="mx-auto max-w-2xl py-6">
+      <button onClick={() => goTo("home")} className="mb-4 flex items-center gap-1 text-xs font-medium" style={{ color: "#5C6B6E" }}>
+        <ArrowLeft size={14} /> Volver a LonjaYa
+      </button>
+      <h1 className="mb-4 text-xl font-semibold" style={{ fontFamily: "'Fraunces', serif" }}>Mis pedidos</h1>
+
+      <ReferralBox user={user} />
+      <PushNotificationsBox user={user} showToast={showToast} />
+
+      {myOrders.length === 0 ? (
+        <p className="rounded-lg border border-dashed p-6 text-center text-sm" style={{ borderColor: "#D9CBB3", color: "#5C6B6E" }}>
+          Todavía no has hecho ningún pedido.
+        </p>
+      ) : (
+        <div className="flex flex-col gap-3">
+          {myOrders.map((o) => (
+            <div key={o.id} className="rounded-lg border bg-white p-4" style={{ borderColor: "#E4D9C4" }}>
+              <div className="flex items-center justify-between text-xs" style={{ color: "#5C6B6E" }}>
+                <span>Pedido #{o.id.slice(-6)}</span>
+                <span>{new Date(o.date).toLocaleDateString("es-ES")}</span>
+              </div>
+              <div className="mt-2 flex flex-col gap-3">
+                {o.lines.map((l, i) => (
+                  <div key={i} className="border-t pt-2" style={{ borderColor: "#EFEAE0" }}>
+                    <p className="text-sm font-semibold">{l.qty} {l.unit || ""} × {l.name}</p>
+                    <ReviewForm line={l} order={o} reviews={reviews} user={user} addReview={addReview} />
+                  </div>
+                ))}
+              </div>
+              <p className="mt-2 border-t pt-2 text-right text-sm font-bold" style={{ borderColor: "#EFEAE0", color: "#E85D42" }}>{eur(o.total)}</p>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ConfirmView({ goTo, order, totalPoints }) {
   const nextReward = LOYALTY_CONFIG.rewardThreshold;
   const progress = Math.min(100, ((totalPoints % nextReward) / nextReward) * 100);
@@ -2322,6 +2641,9 @@ function ConfirmView({ goTo, order, totalPoints }) {
 
       <button onClick={() => goTo("catalog", { category: null })} className="mt-2 rounded-md px-4 py-2 text-sm font-semibold text-white" style={{ backgroundColor: "#0E3A45" }}>
         Seguir comprando
+      </button>
+      <button onClick={() => goTo("mis-pedidos")} className="text-xs font-medium underline" style={{ color: "#5C6B6E" }}>
+        Ver mis pedidos
       </button>
     </div>
   );
