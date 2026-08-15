@@ -1127,6 +1127,7 @@ export default function App() {
             addVendor={addVendor}
             siteSettings={siteSettings}
             updateSiteSettings={updateSiteSettings}
+            upsertProduct={upsertProduct}
           />
         )}
       </main>
@@ -3136,6 +3137,91 @@ function AuctionsAdminSection({ vendors, products, auctions, createAuction, canc
 /*  PORTADA — VÍDEO DE FONDO DEL HERO                                   */
 /* ------------------------------------------------------------------ */
 
+/* ------------------------------------------------------------------ */
+/*  FOTOS DE PRODUCTO — cualquier vendedor, gestionado por el admin     */
+/* ------------------------------------------------------------------ */
+
+function ProductPhotosAdminSection({ products, vendors, upsertProduct }) {
+  const [onlyMissing, setOnlyMissing] = useState(true);
+  const [vendorFilter, setVendorFilter] = useState("");
+  const [uploadingId, setUploadingId] = useState(null);
+  const [error, setError] = useState("");
+
+  const list = useMemo(() => {
+    let l = [...products];
+    if (onlyMissing) l = l.filter((p) => !p.image);
+    if (vendorFilter) l = l.filter((p) => p.vendorId === vendorFilter);
+    return l.sort((a, b) => (a.image ? 1 : 0) - (b.image ? 1 : 0));
+  }, [products, onlyMissing, vendorFilter]);
+
+  const missingCount = products.filter((p) => !p.image).length;
+
+  const handleUpload = async (product, file) => {
+    if (!file) return;
+    setError("");
+    setUploadingId(product.id);
+    try {
+      const url = await uploadProductImage(file);
+      await upsertProduct({ ...product, image: url });
+    } catch (err) {
+      setError(`No se pudo subir la foto de "${product.name}".`);
+    } finally {
+      setUploadingId(null);
+    }
+  };
+
+  return (
+    <div className="mb-8">
+      <h2 className="mb-1 flex items-center gap-1.5 text-sm font-semibold uppercase tracking-wide" style={{ color: "#5C6B6E" }}>
+        📷 Fotos de producto
+      </h2>
+      <p className="mb-3 text-[11px]" style={{ color: "#5C6B6E" }}>
+        Sube o cambia la foto de cualquier producto de cualquier vendedor, sin tener que entrar en su cuenta.
+        {missingCount > 0 && <> Faltan fotos en <strong>{missingCount}</strong> producto{missingCount === 1 ? "" : "s"}.</>}
+      </p>
+
+      <div className="mb-3 flex flex-wrap items-center gap-2">
+        <label className="flex items-center gap-1.5 text-xs" style={{ color: "#5C6B6E" }}>
+          <input type="checkbox" checked={onlyMissing} onChange={(e) => setOnlyMissing(e.target.checked)} />
+          Solo sin foto
+        </label>
+        <select value={vendorFilter} onChange={(e) => setVendorFilter(e.target.value)} className="rounded border px-2 py-1 text-xs" style={{ borderColor: "#D9CBB3" }}>
+          <option value="">Todos los vendedores</option>
+          {vendors.map((v) => <option key={v.id} value={v.id}>{v.name}</option>)}
+        </select>
+      </div>
+
+      {error && <p className="mb-2 text-xs font-medium" style={{ color: "#B04A2F" }}>{error}</p>}
+
+      {list.length === 0 ? (
+        <p className="rounded-lg border border-dashed p-4 text-xs" style={{ borderColor: "#D9CBB3", color: "#5C6B6E" }}>
+          {onlyMissing ? "Todos los productos ya tienen foto 🎉" : "No hay productos que coincidan con el filtro."}
+        </p>
+      ) : (
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6">
+          {list.map((p) => {
+            const vendor = vendors.find((v) => v.id === p.vendorId);
+            const uploading = uploadingId === p.id;
+            return (
+              <div key={p.id} className="rounded-lg border bg-white p-2" style={{ borderColor: "#E4D9C4" }}>
+                <div className="flex h-20 items-center justify-center overflow-hidden rounded-md" style={{ backgroundColor: "#EAF2EF" }}>
+                  {p.image ? <img src={p.image} alt={p.name} className="h-full w-full object-cover" /> : <span className="text-3xl">{p.emoji || "🐟"}</span>}
+                </div>
+                <p className="mt-1.5 truncate text-[11px] font-semibold" title={p.name}>{p.name}</p>
+                <p className="truncate text-[10px]" style={{ color: "#5C6B6E" }} title={vendor?.name}>{vendor?.name}</p>
+                <label className="mt-1.5 flex w-full cursor-pointer items-center justify-center gap-1 rounded-md border px-2 py-1 text-[10px] font-medium" style={{ borderColor: "#D9CBB3" }}>
+                  <ImagePlus size={11} /> {uploading ? "Subiendo…" : p.image ? "Cambiar" : "Subir foto"}
+                  <input type="file" accept="image/*" className="hidden" disabled={uploading} onChange={(e) => handleUpload(p, e.target.files?.[0])} />
+                </label>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function HeroMediaAdminSection({ siteSettings, updateSiteSettings }) {
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState("");
@@ -3206,7 +3292,7 @@ function HeroMediaAdminSection({ siteSettings, updateSiteSettings }) {
   );
 }
 
-function AdminView({ vendors, products, orders, auctions, createAuction, cancelAuction, setVendorStatus, setVendorCommission, addVendor, siteSettings, updateSiteSettings }) {
+function AdminView({ vendors, products, orders, auctions, createAuction, cancelAuction, setVendorStatus, setVendorCommission, addVendor, siteSettings, updateSiteSettings, upsertProduct }) {
   const [showNew, setShowNew] = useState(false);
   const [analytics, setAnalytics] = useState(null);
   const [analyticsLoading, setAnalyticsLoading] = useState(true);
@@ -3251,6 +3337,9 @@ function AdminView({ vendors, products, orders, auctions, createAuction, cancelA
 
       {/* PORTADA */}
       <HeroMediaAdminSection siteSettings={siteSettings} updateSiteSettings={updateSiteSettings} />
+
+      {/* FOTOS DE PRODUCTO */}
+      <ProductPhotosAdminSection products={products} vendors={vendors} upsertProduct={upsertProduct} />
 
       {/* ANALÍTICA DE VISITAS */}
       <div className="mb-8">
