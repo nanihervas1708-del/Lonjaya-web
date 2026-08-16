@@ -5,6 +5,7 @@ import { signIn, signUpVendor, signUpBuyer, signOut, getAuthSession, onAuthChang
 import { fetchVendors, fetchProducts, upsertVendorRow, bulkInsertVendors, upsertProductRow, bulkInsertProducts, deleteProductRow, decrementProductStock, searchProductsFuzzy } from "./lib/marketplace";
 import { fetchAuctions, createAuctionRow, cancelAuctionRow, computeCurrentPrice, reserveAuction, confirmAuctionSale, releaseAuctionReservation } from "./lib/auctions";
 import { fetchReviews, submitReview, vendorAverageRating } from "./lib/reviews";
+import { fetchCommunityPosts, createCommunityPost, hideCommunityPost, fetchRecipes, createRecipe, hideRecipe, uploadUserMedia } from "./lib/community";
 import { createProductAlert, registerReferral, completeReferralIfAny, logCheckoutAttempt, markCheckoutConverted, claimPendingBonusPoints } from "./lib/alerts";
 import { isPushSupported, subscribeToPush, unsubscribeFromPush, sendPushNotification } from "./lib/push";
 import { sendEmail, sendAdminNotification, buildOrderConfirmationEmail, buildVendorNewOrderEmail, buildAdminNewVendorEmail } from "./lib/emails";
@@ -387,6 +388,8 @@ export default function App() {
   const [auctions, setAuctions] = useState([]);
   const [siteSettings, setSiteSettings] = useState({});
   const [reviews, setReviews] = useState([]);
+  const [communityPosts, setCommunityPosts] = useState([]);
+  const [recipes, setRecipes] = useState([]);
   const [orders, setOrders] = useState([]);
   const [cart, setCart] = useState([]);
   const [user, setUser] = useState(null);
@@ -438,6 +441,10 @@ export default function App() {
       let settings = await loadShared("lonja:site_settings", {});
       let rv = [];
       try { rv = await fetchReviews(); } catch {}
+      let posts = [];
+      try { posts = await fetchCommunityPosts(); } catch {}
+      let recs = [];
+      try { recs = await fetchRecipes(); } catch {}
 
       // Admin y vendedor nunca se restauran desde el almacenamiento "demo":
       // dependen de la sesión real de Supabase Auth (ver useEffect de abajo).
@@ -445,7 +452,7 @@ export default function App() {
       const sessionUser = await getAuthSession();
       setAuthUser(sessionUser);
 
-      setProducts(p); setVendors(v); setOrders(o); setCart(c); setUser(u); setPoints(pts); setAuctions(auc); setSiteSettings(settings); setReviews(rv);
+      setProducts(p); setVendors(v); setOrders(o); setCart(c); setUser(u); setPoints(pts); setAuctions(auc); setSiteSettings(settings); setReviews(rv); setCommunityPosts(posts); setRecipes(recs);
       setReady(true);
       trackPageView("home");
     })();
@@ -916,6 +923,56 @@ export default function App() {
     }
   };
 
+  /* -------- blog de opiniones -------- */
+  const addCommunityPost = async ({ targetType, targetId, title, body, rating, image }) => {
+    try {
+      const id = await createCommunityPost({
+        authorEmail: user?.email, authorName: user?.name,
+        targetType, targetId, title, body, rating, image,
+      });
+      setCommunityPosts((prev) => [
+        { id, authorEmail: user?.email, authorName: user?.name, targetType, targetId, title, body, rating, image, status: "published", createdAt: new Date().toISOString() },
+        ...prev,
+      ]);
+      const nextPoints = points + REVIEW_REWARD_POINTS;
+      setPoints(nextPoints);
+      await savePersonal("lonja:points", nextPoints);
+      showToast(`¡Publicado! +${REVIEW_REWARD_POINTS} puntos LonjaYa 🎣`);
+      return true;
+    } catch (err) {
+      showToast("No se pudo publicar tu opinión");
+      return false;
+    }
+  };
+  const adminHidePost = async (id) => {
+    try { await hideCommunityPost(id); setCommunityPosts((prev) => prev.filter((p) => p.id !== id)); } catch {}
+  };
+
+  /* -------- recetario -------- */
+  const addRecipe = async ({ title, description, ingredients, steps, image, video, productId }) => {
+    try {
+      const id = await createRecipe({
+        authorEmail: user?.email, authorName: user?.name,
+        title, description, ingredients, steps, image, video, productId,
+      });
+      setRecipes((prev) => [
+        { id, authorEmail: user?.email, authorName: user?.name, title, description, ingredients, steps, image, video, productId, status: "published", createdAt: new Date().toISOString() },
+        ...prev,
+      ]);
+      const nextPoints = points + REVIEW_REWARD_POINTS * 2; // una receta cuesta más esfuerzo que una opinión
+      setPoints(nextPoints);
+      await savePersonal("lonja:points", nextPoints);
+      showToast(`¡Receta publicada! +${REVIEW_REWARD_POINTS * 2} puntos LonjaYa 🎣`);
+      return true;
+    } catch (err) {
+      showToast("No se pudo publicar la receta");
+      return false;
+    }
+  };
+  const adminHideRecipe = async (id) => {
+    try { await hideRecipe(id); setRecipes((prev) => prev.filter((r) => r.id !== id)); } catch {}
+  };
+
   /* -------- derived: only show products from approved, active vendors -------- */
   const storefrontProducts = useMemo(() => {
     const activeIds = new Set(vendors.filter((v) => v.status === "activo").map((v) => v.id));
@@ -1143,6 +1200,20 @@ export default function App() {
           >
             ⚡ Subastas
           </button>
+          <button
+            onClick={() => goTo("blog")}
+            className="shrink-0 rounded px-3 py-1.5 text-xs font-semibold tracking-wide"
+            style={{ color: "#F6F8F7", backgroundColor: view === "blog" ? "#1A4650" : "transparent" }}
+          >
+            📝 Blog
+          </button>
+          <button
+            onClick={() => goTo("recetario")}
+            className="shrink-0 rounded px-3 py-1.5 text-xs font-semibold tracking-wide"
+            style={{ color: "#F6F8F7", backgroundColor: view === "recetario" ? "#1A4650" : "transparent" }}
+          >
+            🍽️ Recetario
+          </button>
         </nav>
       </header>
 
@@ -1196,6 +1267,18 @@ export default function App() {
         )}
         {view === "confirm" && <ConfirmView goTo={goTo} order={lastOrder} totalPoints={points} />}
         {view === "mis-pedidos" && <MyOrdersView orders={orders} user={user} reviews={reviews} addReview={addReview} goTo={goTo} showToast={showToast} />}
+        {view === "blog" && (
+          <BlogView
+            posts={communityPosts} vendors={vendors} products={products} user={user} goTo={goTo}
+            addCommunityPost={addCommunityPost} isAdmin={user?.role === "admin"} adminHidePost={adminHidePost}
+          />
+        )}
+        {view === "recetario" && (
+          <RecipesView
+            recipes={recipes} products={products} user={user}
+            addRecipe={addRecipe} isAdmin={user?.role === "admin"} adminHideRecipe={adminHideRecipe}
+          />
+        )}
         {view.startsWith("legal-") && <LegalPageView docId={view.replace("legal-", "")} goTo={goTo} />}
         {view === "contacto" && <ContactFormView goTo={goTo} />}
         {view === "login" && <LoginView loginBuyer={loginBuyer} loginAdmin={loginAdmin} loginVendor={loginVendor} goTo={goTo} />}
@@ -1841,6 +1924,261 @@ function ProductView({ product, vendor, allProducts, vendors, addToCart, goTo, u
 
 /* ------------------------------------------------------------------ */
 /*  SUBASTAS — TIENDA                                                   */
+/* ------------------------------------------------------------------ */
+
+/* ------------------------------------------------------------------ */
+/*  BLOG DE OPINIONES                                                   */
+/* ------------------------------------------------------------------ */
+
+function NewPostForm({ vendors, products, user, addCommunityPost, onDone }) {
+  const [form, setForm] = useState({ targetType: "general", targetId: "", title: "", body: "", rating: 5, image: null });
+  const [uploading, setUploading] = useState(false);
+  const [sending, setSending] = useState(false);
+
+  const canSubmit = form.title.trim() && form.body.trim();
+
+  const handlePhoto = async (file) => {
+    if (!file) return;
+    setUploading(true);
+    try { setForm((f) => ({ ...f, image: await uploadUserMedia(file) })); }
+    catch {} finally { setUploading(false); }
+  };
+
+  return (
+    <div className="mb-6 rounded-lg border bg-white p-4" style={{ borderColor: "#E4D9C4" }}>
+      <p className="mb-3 text-sm font-semibold">Escribe tu opinión</p>
+      <select value={form.targetType} onChange={(e) => setForm((f) => ({ ...f, targetType: e.target.value, targetId: "" }))} className="mb-2 w-full rounded border px-3 py-2 text-sm" style={{ borderColor: "#D9CBB3" }}>
+        <option value="general">Opinión general sobre LonjaYa</option>
+        <option value="vendor">Sobre una empresa/vendedor</option>
+        <option value="product">Sobre un producto</option>
+      </select>
+      {form.targetType === "vendor" && (
+        <select value={form.targetId} onChange={(e) => setForm((f) => ({ ...f, targetId: e.target.value }))} className="mb-2 w-full rounded border px-3 py-2 text-sm" style={{ borderColor: "#D9CBB3" }}>
+          <option value="">Elige una empresa…</option>
+          {vendors.map((v) => <option key={v.id} value={v.id}>{v.name}</option>)}
+        </select>
+      )}
+      {form.targetType === "product" && (
+        <select value={form.targetId} onChange={(e) => setForm((f) => ({ ...f, targetId: e.target.value }))} className="mb-2 w-full rounded border px-3 py-2 text-sm" style={{ borderColor: "#D9CBB3" }}>
+          <option value="">Elige un producto…</option>
+          {products.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+        </select>
+      )}
+      <input placeholder="Título" value={form.title} onChange={(e) => setForm((f) => ({ ...f, title: e.target.value }))} className="mb-2 w-full rounded border px-3 py-2 text-sm" style={{ borderColor: "#D9CBB3" }} />
+      <textarea placeholder="Cuéntanos tu opinión…" rows={3} value={form.body} onChange={(e) => setForm((f) => ({ ...f, body: e.target.value }))} className="mb-2 w-full rounded border px-3 py-2 text-sm" style={{ borderColor: "#D9CBB3" }} />
+      <div className="mb-2 flex items-center gap-3">
+        <StarPicker value={form.rating} onChange={(r) => setForm((f) => ({ ...f, rating: r }))} />
+        <label className="inline-flex cursor-pointer items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs font-medium" style={{ borderColor: "#D9CBB3" }}>
+          <ImagePlus size={13} /> {uploading ? "Subiendo…" : form.image ? "Foto añadida" : "Añadir foto (opcional)"}
+          <input type="file" accept="image/*" className="hidden" disabled={uploading} onChange={(e) => handlePhoto(e.target.files?.[0])} />
+        </label>
+      </div>
+      <button
+        disabled={!canSubmit || sending || uploading}
+        onClick={async () => {
+          setSending(true);
+          const ok = await addCommunityPost(form);
+          setSending(false);
+          if (ok) onDone();
+        }}
+        className="rounded-md px-4 py-2 text-sm font-semibold text-white disabled:opacity-40"
+        style={{ backgroundColor: "#E85D42" }}
+      >
+        {sending ? "Publicando…" : "Publicar opinión"}
+      </button>
+    </div>
+  );
+}
+
+function BlogView({ posts, vendors, products, user, goTo, addCommunityPost, isAdmin, adminHidePost }) {
+  const [showForm, setShowForm] = useState(false);
+
+  const targetLabel = (post) => {
+    if (post.targetType === "vendor") return vendors.find((v) => v.id === post.targetId)?.name;
+    if (post.targetType === "product") return products.find((p) => p.id === post.targetId)?.name;
+    return null;
+  };
+
+  return (
+    <div className="mx-auto max-w-2xl py-6">
+      <div className="mb-4 flex items-center justify-between">
+        <div>
+          <h1 className="text-xl font-semibold" style={{ fontFamily: "'Fraunces', serif" }}>Blog de opiniones</h1>
+          <p className="text-xs" style={{ color: "#5C6B6E" }}>Lo que opinan de verdad nuestros compradores.</p>
+        </div>
+        {user?.role === "comprador" && (
+          <button onClick={() => setShowForm((s) => !s)} className="rounded-md px-3 py-2 text-xs font-semibold text-white" style={{ backgroundColor: "#0E3A45" }}>
+            {showForm ? "Cancelar" : "+ Escribir opinión"}
+          </button>
+        )}
+      </div>
+
+      {showForm && (
+        <NewPostForm vendors={vendors} products={products} user={user} addCommunityPost={addCommunityPost} onDone={() => setShowForm(false)} />
+      )}
+
+      {posts.length === 0 ? (
+        <p className="rounded-lg border border-dashed p-6 text-center text-sm" style={{ borderColor: "#D9CBB3", color: "#5C6B6E" }}>
+          Todavía no hay opiniones — ¡sé el primero!
+        </p>
+      ) : (
+        <div className="flex flex-col gap-3">
+          {posts.map((post) => (
+            <div key={post.id} className="rounded-lg border bg-white p-4" style={{ borderColor: "#E4D9C4" }}>
+              <div className="flex items-start justify-between">
+                <div>
+                  <p className="text-sm font-semibold">{post.title}</p>
+                  <p className="text-[11px]" style={{ color: "#5C6B6E" }}>
+                    {post.authorName} · {new Date(post.createdAt).toLocaleDateString("es-ES")}
+                    {targetLabel(post) && <> · sobre <strong>{targetLabel(post)}</strong></>}
+                  </p>
+                </div>
+                {post.rating && (
+                  <span className="flex items-center gap-0.5 text-xs font-semibold" style={{ color: "#B08900" }}>
+                    <Star size={13} fill="#B08900" /> {post.rating}
+                  </span>
+                )}
+              </div>
+              <p className="mt-2 text-sm" style={{ color: "#3A4649" }}>{post.body}</p>
+              {post.image && <img src={post.image} alt="" className="mt-2 max-h-56 w-full rounded-md object-cover" />}
+              {isAdmin && (
+                <button onClick={() => adminHidePost(post.id)} className="mt-2 text-[11px] font-medium underline" style={{ color: "#B04A2F" }}>
+                  Ocultar (moderación)
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+
+/* ------------------------------------------------------------------ */
+/*  RECETARIO                                                           */
+/* ------------------------------------------------------------------ */
+
+function NewRecipeForm({ products, addRecipe, onDone }) {
+  const [form, setForm] = useState({ title: "", description: "", ingredients: "", steps: "", image: null, video: null, productId: "" });
+  const [uploadingImg, setUploadingImg] = useState(false);
+  const [uploadingVid, setUploadingVid] = useState(false);
+  const [sending, setSending] = useState(false);
+
+  const canSubmit = form.title.trim() && form.ingredients.trim() && form.steps.trim();
+
+  const handleFile = async (file, kind) => {
+    if (!file) return;
+    const setUploading = kind === "image" ? setUploadingImg : setUploadingVid;
+    setUploading(true);
+    try { setForm((f) => ({ ...f, [kind]: await uploadUserMedia(file) })); }
+    catch {} finally { setUploading(false); }
+  };
+
+  return (
+    <div className="mb-6 rounded-lg border bg-white p-4" style={{ borderColor: "#E4D9C4" }}>
+      <p className="mb-3 text-sm font-semibold">Comparte tu receta</p>
+      <input placeholder="Título de la receta" value={form.title} onChange={(e) => setForm((f) => ({ ...f, title: e.target.value }))} className="mb-2 w-full rounded border px-3 py-2 text-sm" style={{ borderColor: "#D9CBB3" }} />
+      <input placeholder="Breve descripción (opcional)" value={form.description} onChange={(e) => setForm((f) => ({ ...f, description: e.target.value }))} className="mb-2 w-full rounded border px-3 py-2 text-sm" style={{ borderColor: "#D9CBB3" }} />
+      <select value={form.productId} onChange={(e) => setForm((f) => ({ ...f, productId: e.target.value }))} className="mb-2 w-full rounded border px-3 py-2 text-sm" style={{ borderColor: "#D9CBB3" }}>
+        <option value="">¿Con qué producto de LonjaYa? (opcional)</option>
+        {products.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+      </select>
+      <textarea placeholder="Ingredientes (uno por línea)" rows={3} value={form.ingredients} onChange={(e) => setForm((f) => ({ ...f, ingredients: e.target.value }))} className="mb-2 w-full rounded border px-3 py-2 text-sm" style={{ borderColor: "#D9CBB3" }} />
+      <textarea placeholder="Pasos a seguir" rows={4} value={form.steps} onChange={(e) => setForm((f) => ({ ...f, steps: e.target.value }))} className="mb-2 w-full rounded border px-3 py-2 text-sm" style={{ borderColor: "#D9CBB3" }} />
+      <div className="mb-3 flex flex-wrap gap-2">
+        <label className="inline-flex cursor-pointer items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-xs font-medium" style={{ borderColor: "#D9CBB3" }}>
+          <ImagePlus size={13} /> {uploadingImg ? "Subiendo…" : form.image ? "Foto añadida ✓" : "Añadir foto"}
+          <input type="file" accept="image/*" className="hidden" disabled={uploadingImg} onChange={(e) => handleFile(e.target.files?.[0], "image")} />
+        </label>
+        <label className="inline-flex cursor-pointer items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-xs font-medium" style={{ borderColor: "#D9CBB3" }}>
+          <ImagePlus size={13} /> {uploadingVid ? "Subiendo…" : form.video ? "Vídeo añadido ✓" : "Añadir vídeo (opcional)"}
+          <input type="file" accept="video/*" className="hidden" disabled={uploadingVid} onChange={(e) => handleFile(e.target.files?.[0], "video")} />
+        </label>
+      </div>
+      <button
+        disabled={!canSubmit || sending || uploadingImg || uploadingVid}
+        onClick={async () => {
+          setSending(true);
+          const ok = await addRecipe(form);
+          setSending(false);
+          if (ok) onDone();
+        }}
+        className="rounded-md px-4 py-2 text-sm font-semibold text-white disabled:opacity-40"
+        style={{ backgroundColor: "#E85D42" }}
+      >
+        {sending ? "Publicando…" : "Publicar receta"}
+      </button>
+    </div>
+  );
+}
+
+function RecipeCard({ recipe, isAdmin, adminHideRecipe }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="overflow-hidden rounded-lg border bg-white" style={{ borderColor: "#E4D9C4" }}>
+      <button onClick={() => setOpen((o) => !o)} className="block w-full text-left">
+        <div className="flex h-40 items-center justify-center overflow-hidden" style={{ backgroundColor: "#EAF2EF" }}>
+          {recipe.image ? <img src={recipe.image} alt={recipe.title} className="h-full w-full object-cover" /> : <span className="text-5xl">🍽️</span>}
+        </div>
+        <div className="p-3">
+          <p className="text-sm font-semibold">{recipe.title}</p>
+          <p className="text-[11px]" style={{ color: "#5C6B6E" }}>{recipe.authorName}</p>
+        </div>
+      </button>
+      {open && (
+        <div className="border-t p-3" style={{ borderColor: "#EFEAE0" }}>
+          {recipe.description && <p className="mb-2 text-xs" style={{ color: "#5C6B6E" }}>{recipe.description}</p>}
+          {recipe.video && (
+            <video src={recipe.video} controls className="mb-2 w-full rounded-md" />
+          )}
+          <p className="mb-1 text-xs font-semibold">Ingredientes</p>
+          <p className="mb-2 whitespace-pre-line text-xs" style={{ color: "#3A4649" }}>{recipe.ingredients}</p>
+          <p className="mb-1 text-xs font-semibold">Pasos</p>
+          <p className="whitespace-pre-line text-xs" style={{ color: "#3A4649" }}>{recipe.steps}</p>
+          {isAdmin && (
+            <button onClick={() => adminHideRecipe(recipe.id)} className="mt-2 text-[11px] font-medium underline" style={{ color: "#B04A2F" }}>
+              Ocultar (moderación)
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function RecipesView({ recipes, products, user, addRecipe, isAdmin, adminHideRecipe }) {
+  const [showForm, setShowForm] = useState(false);
+  return (
+    <div className="mx-auto max-w-4xl py-6">
+      <div className="mb-4 flex items-center justify-between">
+        <div>
+          <h1 className="text-xl font-semibold" style={{ fontFamily: "'Fraunces', serif" }}>Recetario</h1>
+          <p className="text-xs" style={{ color: "#5C6B6E" }}>Recetas de la comunidad, con foto y vídeo.</p>
+        </div>
+        {user?.role === "comprador" && (
+          <button onClick={() => setShowForm((s) => !s)} className="rounded-md px-3 py-2 text-xs font-semibold text-white" style={{ backgroundColor: "#0E3A45" }}>
+            {showForm ? "Cancelar" : "+ Compartir receta"}
+          </button>
+        )}
+      </div>
+
+      {showForm && <NewRecipeForm products={products} addRecipe={addRecipe} onDone={() => setShowForm(false)} />}
+
+      {recipes.length === 0 ? (
+        <p className="rounded-lg border border-dashed p-6 text-center text-sm" style={{ borderColor: "#D9CBB3", color: "#5C6B6E" }}>
+          Todavía no hay recetas — ¡comparte la primera!
+        </p>
+      ) : (
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          {recipes.map((r) => <RecipeCard key={r.id} recipe={r} isAdmin={isAdmin} adminHideRecipe={adminHideRecipe} />)}
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* ------------------------------------------------------------------ */
 
 function AuctionsView({ auctions, products, vendors, user, goTo, reserveAuctionForPurchase, showToast }) {
