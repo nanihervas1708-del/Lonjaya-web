@@ -1250,6 +1250,13 @@ export default function App() {
           >
             🍽️ Recetario
           </button>
+          <button
+            onClick={() => goTo("hosteleria")}
+            className="shrink-0 rounded px-3 py-1.5 text-xs font-semibold tracking-wide"
+            style={{ color: "#F6F8F7", backgroundColor: view === "hosteleria" ? "#1A4650" : "transparent" }}
+          >
+            🍴 Hostelería
+          </button>
           <span className="mx-1 shrink-0 border-l" style={{ borderColor: "#2A4E56" }} />
           {CATEGORIES.map((c) => (
             <button
@@ -1686,6 +1693,31 @@ function HomeView({ products, vendors, goTo, addToCart, siteSettings, setFilters
             <ProductCard key={p.id} product={p} vendor={vendorOf(p.vendorId)} onOpen={(id) => goTo("product", { productId: id })} onAdd={addToCart} />
           ))}
         </div>
+      </section>
+
+      {/* HOSTELERÍA — banner destacado */}
+      <section
+        className="flex flex-col items-center gap-4 rounded-xl p-6 text-center sm:flex-row sm:justify-between sm:text-left sm:p-8"
+        style={{ background: "linear-gradient(120deg,#1E3A40,#0E3A45)" }}
+      >
+        <div>
+          <span className="text-xs font-semibold tracking-[0.2em]" style={{ color: "#E4D9C4", fontFamily: "'IBM Plex Mono', monospace" }}>
+            PARA PROFESIONALES
+          </span>
+          <h2 className="mt-1 text-xl sm:text-2xl" style={{ fontFamily: "'Fraunces', serif", fontWeight: 600, color: "#F6F8F7" }}>
+            🍴 ¿Tienes un bar o restaurante?
+          </h2>
+          <p className="mt-1 text-sm" style={{ color: "#C9D6D2" }}>
+            Pedidos recurrentes, precios por volumen y contacto directo con tu lonja.
+          </p>
+        </div>
+        <button
+          onClick={() => goTo("hosteleria")}
+          className="shrink-0 rounded-md px-5 py-2.5 text-sm font-semibold text-white"
+          style={{ backgroundColor: "#E85D42" }}
+        >
+          Ver condiciones de hostelería
+        </button>
       </section>
 
       {/* VENDORS */}
