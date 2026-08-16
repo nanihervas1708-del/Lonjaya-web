@@ -1183,16 +1183,6 @@ export default function App() {
           >
             Todo
           </button>
-          {CATEGORIES.map((c) => (
-            <button
-              key={c.id}
-              onClick={() => goTo("catalog", { category: c.id })}
-              className="shrink-0 rounded px-3 py-1.5 text-xs font-semibold tracking-wide"
-              style={{ color: "#F6F8F7", backgroundColor: activeCategory === c.id ? "#1A4650" : "transparent" }}
-            >
-              {c.emoji} {c.name}
-            </button>
-          ))}
           <button
             onClick={() => goTo("subastas")}
             className="shrink-0 rounded px-3 py-1.5 text-xs font-semibold tracking-wide"
@@ -1214,6 +1204,17 @@ export default function App() {
           >
             🍽️ Recetario
           </button>
+          <span className="mx-1 shrink-0 border-l" style={{ borderColor: "#2A4E56" }} />
+          {CATEGORIES.map((c) => (
+            <button
+              key={c.id}
+              onClick={() => goTo("catalog", { category: c.id })}
+              className="shrink-0 rounded px-3 py-1.5 text-xs font-semibold tracking-wide"
+              style={{ color: "#F6F8F7", backgroundColor: activeCategory === c.id ? "#1A4650" : "transparent" }}
+            >
+              {c.emoji} {c.name}
+            </button>
+          ))}
         </nav>
       </header>
 
