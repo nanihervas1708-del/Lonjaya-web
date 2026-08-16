@@ -6,7 +6,7 @@ import { fetchVendors, fetchProducts, upsertVendorRow, bulkInsertVendors, upsert
 import { fetchAuctions, createAuctionRow, cancelAuctionRow, computeCurrentPrice, reserveAuction, confirmAuctionSale, releaseAuctionReservation } from "./lib/auctions";
 import { fetchReviews, submitReview, vendorAverageRating } from "./lib/reviews";
 import { fetchCommunityPosts, createCommunityPost, hideCommunityPost, fetchRecipes, createRecipe, hideRecipe, uploadUserMedia } from "./lib/community";
-import { createProductAlert, registerReferral, completeReferralIfAny, logCheckoutAttempt, markCheckoutConverted, claimPendingBonusPoints } from "./lib/alerts";
+import { createProductAlert, registerReferral, completeReferralIfAny, logCheckoutAttempt, markCheckoutConverted, claimPendingBonusPoints, subscribeNewsletter } from "./lib/alerts";
 import { isPushSupported, subscribeToPush, unsubscribeFromPush, sendPushNotification } from "./lib/push";
 import { sendEmail, sendAdminNotification, buildOrderConfirmationEmail, buildVendorNewOrderEmail, buildAdminNewVendorEmail } from "./lib/emails";
 import { marked } from "marked";
@@ -259,6 +259,44 @@ function useAuctionTick() {
 }
 
 /* Ticker flotante de compras recientes (prueba social simulada) */
+function NewsletterForm() {
+  const [email, setEmail] = useState("");
+  const [state, setState] = useState("idle"); // idle | sending | done
+
+  const submit = async () => {
+    if (!email.includes("@")) return;
+    setState("sending");
+    try {
+      await subscribeNewsletter(email);
+      setState("done");
+    } catch {
+      setState("idle");
+    }
+  };
+
+  if (state === "done") {
+    return <p className="text-xs font-medium" style={{ color: "#2F6B5E" }}>✓ ¡Gracias! Ya estás suscrito al boletín.</p>;
+  }
+
+  return (
+    <div className="flex w-full max-w-xs gap-2">
+      <input
+        type="email" placeholder="Tu email" value={email} onChange={(e) => setEmail(e.target.value)}
+        onKeyDown={(e) => e.key === "Enter" && submit()}
+        className="flex-1 rounded-md border px-3 py-1.5 text-xs" style={{ borderColor: "#3A4649", backgroundColor: "#1E2E33", color: "#F6F8F7" }}
+      />
+      <button
+        disabled={state === "sending"}
+        onClick={submit}
+        className="shrink-0 rounded-md px-3 py-1.5 text-xs font-semibold text-white disabled:opacity-50"
+        style={{ backgroundColor: "#E85D42" }}
+      >
+        {state === "sending" ? "…" : "Suscribirme"}
+      </button>
+    </div>
+  );
+}
+
 function LiveActivityTicker({ orders }) {
   const [idx, setIdx] = useState(0);
   const [visible, setVisible] = useState(false);
@@ -520,51 +558,59 @@ export default function App() {
   };
 
   /* -------- cart ops -------- */
-  const addToCart = (productId, qty = 1) => {
+  const addToCart = (productId, qty = 1, variantLabel = null) => {
     const product = products.find((p) => p.id === productId);
     const stock = product?.stock ?? 0;
     setCart((prev) => {
-      const existing = prev.find((i) => i.productId === productId);
+      const existing = prev.find((i) => i.productId === productId && (i.variantLabel || null) === (variantLabel || null));
       const currentQty = existing?.qty ?? 0;
       const desiredQty = currentQty + qty;
       const finalQty = Math.min(desiredQty, stock);
       if (finalQty <= 0) return prev;
       let next;
       if (existing) {
-        next = prev.map((i) => (i.productId === productId ? { ...i, qty: finalQty } : i));
+        next = prev.map((i) => (i === existing ? { ...i, qty: finalQty } : i));
       } else {
-        next = [...prev, { productId, qty: finalQty }];
+        next = [...prev, { productId, qty: finalQty, variantLabel: variantLabel || null }];
       }
       savePersonal("lonja:cart", next);
       return next;
     });
     if (stock <= 0) {
       showToast("Sin stock disponible ahora mismo");
-    } else if ((cart.find((i) => i.productId === productId)?.qty ?? 0) + qty > stock) {
+    } else if ((cart.find((i) => i.productId === productId && (i.variantLabel || null) === (variantLabel || null))?.qty ?? 0) + qty > stock) {
       showToast(`Solo quedan ${stock} disponibles, se ha ajustado la cantidad`);
     } else {
       showToast("Añadido a la cesta");
     }
   };
-  const updateQty = (productId, qty) => {
+  const updateQty = (productId, qty, variantLabel = null) => {
     const product = products.find((p) => p.id === productId);
     const stock = product?.stock ?? 0;
     const cappedQty = Math.min(qty, stock);
     setCart((prev) => {
       const next = cappedQty <= 0
-        ? prev.filter((i) => i.productId !== productId)
-        : prev.map((i) => (i.productId === productId ? { ...i, qty: cappedQty } : i));
+        ? prev.filter((i) => !(i.productId === productId && (i.variantLabel || null) === (variantLabel || null)))
+        : prev.map((i) => (i.productId === productId && (i.variantLabel || null) === (variantLabel || null) ? { ...i, qty: cappedQty } : i));
       savePersonal("lonja:cart", next);
       return next;
     });
   };
-  const removeFromCart = (productId) => updateQty(productId, 0);
+  const removeFromCart = (productId, variantLabel = null) => updateQty(productId, 0, variantLabel);
 
   const cartLines = useMemo(
-    () => cart.map((i) => ({ ...i, product: products.find((p) => p.id === i.productId) })).filter((l) => l.product),
+    () => cart
+      .map((i) => {
+        const product = products.find((p) => p.id === i.productId);
+        if (!product) return null;
+        const variant = i.variantLabel ? product.variants?.find((v) => v.label === i.variantLabel) : null;
+        const unitPrice = variant ? variant.price : product.price;
+        return { ...i, product, unitPrice };
+      })
+      .filter(Boolean),
     [cart, products]
   );
-  const cartTotal = useMemo(() => cartLines.reduce((s, l) => s + l.product.price * l.qty, 0), [cartLines]);
+  const cartTotal = useMemo(() => cartLines.reduce((s, l) => s + l.unitPrice * l.qty, 0), [cartLines]);
   const cartCount = useMemo(() => cart.reduce((s, i) => s + i.qty, 0), [cart]);
 
   /* -------- auth -------- */
@@ -755,9 +801,9 @@ export default function App() {
       date: new Date().toISOString(),
       lines: cartLines.map((l) => {
         const rate = vendors.find((v) => v.id === l.product.vendorId)?.commissionRate ?? DEFAULT_COMMISSION;
-        const gross = l.product.price * l.qty;
+        const gross = l.unitPrice * l.qty;
         return {
-          productId: l.productId, name: l.product.name, vendorId: l.product.vendorId, qty: l.qty, unit: l.product.unit, price: l.product.price,
+          productId: l.productId, name: l.product.name + (l.variantLabel ? ` (${l.variantLabel})` : ""), vendorId: l.product.vendorId, qty: l.qty, unit: l.product.unit, price: l.unitPrice,
           commissionRate: rate, commission: Math.round(gross * rate * 100) / 100, vendorPayout: Math.round(gross * (1 - rate) * 100) / 100,
         };
       }),
@@ -1250,7 +1296,7 @@ export default function App() {
           <CartView lines={cartLines} updateQty={updateQty} removeFromCart={removeFromCart} total={cartTotal} goTo={goTo} />
         )}
         {view === "checkout" && (
-          <CheckoutView lines={cartLines} total={cartTotal} user={user} placeOrder={placeOrder} goTo={goTo} />
+          <CheckoutView lines={cartLines} total={cartTotal} user={user} placeOrder={placeOrder} goTo={goTo} siteSettings={siteSettings} />
         )}
         {view === "subastas" && (
           <AuctionsView
@@ -1282,6 +1328,7 @@ export default function App() {
         )}
         {view.startsWith("legal-") && <LegalPageView docId={view.replace("legal-", "")} goTo={goTo} />}
         {view === "contacto" && <ContactFormView goTo={goTo} />}
+        {view === "hosteleria" && <HosteleriaView goTo={goTo} />}
         {view === "login" && <LoginView loginBuyer={loginBuyer} loginAdmin={loginAdmin} loginVendor={loginVendor} goTo={goTo} />}
         {view === "comprador-alta" && <BuyerSignupView registerBuyer={registerBuyer} goTo={goTo} />}
         {view === "vendor-dash" && user?.role === "vendedor" && (
@@ -1321,7 +1368,9 @@ export default function App() {
           <p className="text-xs" style={{ color: "#7C8B8E", fontFamily: "'IBM Plex Mono', monospace" }}>
             LonjaYa — marketplace de pescado y marisco de lonja a mesa. Comisión transparente por venta, tú fijas tus precios.
             {" "}Logística en frío a cargo de {LOGISTICS_INFO.partnerName}.
+            {" "}Producto seleccionado directamente de {new Set(vendors.map((v) => v.location)).size || 0} lonjas y puertos de toda España.
           </p>
+          <NewsletterForm />
           <div className="flex flex-wrap items-center justify-center gap-x-3 gap-y-1 text-[11px]" style={{ color: "#5C6B6E" }}>
             {[
               { id: "aviso", label: "Aviso legal" },
@@ -1338,6 +1387,10 @@ export default function App() {
             <span className="flex items-center gap-3">
               <span style={{ color: "#3A4649" }}>·</span>
               <button onClick={() => goTo("contacto")} className="hover:underline">Contacto</button>
+            </span>
+            <span className="flex items-center gap-3">
+              <span style={{ color: "#3A4649" }}>·</span>
+              <button onClick={() => goTo("hosteleria")} className="hover:underline">Hostelería</button>
             </span>
           </div>
         </div>
@@ -1382,6 +1435,7 @@ function FontImports() {
 function ProductCard({ product, vendor, onOpen, onAdd }) {
   const { rating, count } = productReviews(product.id);
   const isBestseller = BESTSELLER_IDS.has(product.id);
+  const minVariantPrice = product.variants?.length ? Math.min(...product.variants.map((v) => v.price)) : null;
   return (
     <div
       className="group relative flex flex-col overflow-hidden rounded-lg border bg-white transition-shadow hover:shadow-md"
@@ -1405,7 +1459,12 @@ function ProductCard({ product, vendor, onOpen, onAdd }) {
             {product.name}
           </h3>
           <RatingStars rating={rating} count={count} />
-          <FreshBadge freshness={product.freshness} />
+          <div className="flex flex-wrap items-center gap-1.5">
+            <FreshBadge freshness={product.freshness} />
+            {product.seasonal && (
+              <span className="rounded-full px-1.5 py-0.5 text-[10px] font-bold" style={{ backgroundColor: "#B0890022", color: "#B08900" }}>🍂 Temporada</span>
+            )}
+          </div>
           {product.stock <= 8 && (
             <span className="flex items-center gap-1 text-[11px] font-semibold" style={{ color: "#B04A2F" }}>
               <span className="relative flex h-1.5 w-1.5">
@@ -1416,8 +1475,9 @@ function ProductCard({ product, vendor, onOpen, onAdd }) {
             </span>
           )}
           <div className="mt-1 flex items-baseline gap-1 border-t border-dashed pt-2" style={{ borderColor: "#D9CBB3" }}>
+            {minVariantPrice != null && <span className="text-[11px]" style={{ color: "#5C6B6E" }}>Desde</span>}
             <span className="text-lg font-bold" style={{ color: "#E85D42", fontFamily: "'IBM Plex Mono', monospace" }}>
-              {eur(product.price)}
+              {eur(minVariantPrice ?? product.price)}
             </span>
             <span className="text-xs" style={{ color: "#5C6B6E" }}>/{product.unit}</span>
           </div>
@@ -1425,12 +1485,12 @@ function ProductCard({ product, vendor, onOpen, onAdd }) {
       </button>
       <div className="px-3 pb-3">
         <button
-          onClick={() => onAdd(product.id)}
+          onClick={() => (minVariantPrice != null ? onOpen(product.id) : onAdd(product.id))}
           disabled={product.stock <= 0}
           className="flex w-full items-center justify-center gap-1.5 rounded-md py-1.5 text-xs font-semibold text-white transition-colors disabled:cursor-not-allowed disabled:opacity-50"
           style={{ backgroundColor: product.stock <= 0 ? "#5C6B6E" : "#0E3A45" }}
         >
-          {product.stock <= 0 ? "Agotado" : <><Plus size={14} /> Añadir a la cesta</>}
+          {product.stock <= 0 ? "Agotado" : minVariantPrice != null ? <>Elegir tamaño</> : <><Plus size={14} /> Añadir a la cesta</>}
         </button>
       </div>
     </div>
@@ -1818,7 +1878,10 @@ function StockAlertBox({ product, user }) {
 
 function ProductView({ product, vendor, allProducts, vendors, addToCart, goTo, user }) {
   const [qty, setQty] = useState(1);
+  const [variantLabel, setVariantLabel] = useState(product.variants?.[0]?.label || null);
   const { rating, count } = productReviews(product.id);
+  const activeVariant = product.variants?.find((v) => v.label === variantLabel);
+  const displayPrice = activeVariant ? activeVariant.price : product.price;
 
   const alternatives = useMemo(() => {
     return allProducts
@@ -1845,13 +1908,38 @@ function ProductView({ product, vendor, allProducts, vendors, addToCart, goTo, u
           <div className="mt-1.5"><RatingStars rating={rating} count={count} size={14} /></div>
           <div className="mt-3 flex items-center gap-3">
             <FreshBadge freshness={product.freshness} />
+            {product.seasonal && (
+              <span className="rounded-full px-2 py-0.5 text-[10px] font-bold" style={{ backgroundColor: "#B0890022", color: "#B08900" }}>🍂 De temporada</span>
+            )}
             <span className="flex items-center gap-1 text-xs" style={{ color: "#5C6B6E" }}><MapPin size={12} /> {product.origin}</span>
           </div>
           <div className="mt-5 flex items-baseline gap-1.5">
-            <span className="text-3xl font-bold" style={{ color: "#E85D42", fontFamily: "'IBM Plex Mono', monospace" }}>{eur(product.price)}</span>
+            <span className="text-3xl font-bold" style={{ color: "#E85D42", fontFamily: "'IBM Plex Mono', monospace" }}>{eur(displayPrice)}</span>
             <span className="text-sm" style={{ color: "#5C6B6E" }}>/{product.unit}</span>
           </div>
           <p className="mt-4 text-sm leading-relaxed" style={{ color: "#3A4649" }}>{product.desc}</p>
+
+          {product.variants?.length > 0 && (
+            <div className="mt-4">
+              <p className="mb-1.5 text-xs font-semibold" style={{ color: "#5C6B6E" }}>Elige tamaño/cantidad</p>
+              <div className="flex flex-wrap gap-2">
+                {product.variants.map((v) => (
+                  <button
+                    key={v.label}
+                    onClick={() => setVariantLabel(v.label)}
+                    className="rounded-md border px-3 py-1.5 text-xs font-medium"
+                    style={{
+                      borderColor: variantLabel === v.label ? "#0E3A45" : "#D9CBB3",
+                      backgroundColor: variantLabel === v.label ? "#0E3A45" : "white",
+                      color: variantLabel === v.label ? "white" : "#16242A",
+                    }}
+                  >
+                    {v.label} · {eur(v.price)}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
 
           <div className="mt-5 flex items-center gap-1 text-xs" style={{ color: product.stock > 5 ? "#2F6B5E" : "#B04A2F" }}>
             <Package size={14} /> {product.stock > 5 ? "En stock" : `Últimas ${product.stock} unidades`}
@@ -1867,7 +1955,7 @@ function ProductView({ product, vendor, allProducts, vendors, addToCart, goTo, u
               <button onClick={() => setQty((q) => Math.min(product.stock, q + 1))} className="p-2"><Plus size={14} /></button>
             </div>
             <button
-              onClick={() => addToCart(product.id, qty)}
+              onClick={() => addToCart(product.id, qty, variantLabel)}
               disabled={product.stock <= 0}
               className="flex flex-1 items-center justify-center gap-2 rounded-md py-2.5 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50"
               style={{ backgroundColor: product.stock <= 0 ? "#5C6B6E" : "#0E3A45" }}
@@ -2373,21 +2461,21 @@ function CartView({ lines, updateQty, removeFromCart, total, goTo }) {
         <h1 className="mb-4 text-xl font-semibold" style={{ fontFamily: "'Fraunces', serif" }}>Tu cesta</h1>
         <div className="flex flex-col gap-3">
           {lines.map((l) => (
-            <div key={l.productId} className="flex items-center gap-3 rounded-lg border bg-white p-3" style={{ borderColor: "#E4D9C4" }}>
+            <div key={l.productId + (l.variantLabel || "")} className="flex items-center gap-3 rounded-lg border bg-white p-3" style={{ borderColor: "#E4D9C4" }}>
               <div className="flex h-16 w-16 shrink-0 items-center justify-center rounded text-3xl overflow-hidden" style={{ background: "#EAF2EF" }}>
                 {l.product.image ? <img src={l.product.image} alt={l.product.name} className="h-full w-full object-cover" /> : l.product.emoji}
               </div>
               <div className="flex-1">
-                <p className="text-sm font-semibold">{l.product.name}</p>
-                <p className="text-xs" style={{ color: "#5C6B6E" }}>{eur(l.product.price)}/{l.product.unit}</p>
+                <p className="text-sm font-semibold">{l.product.name}{l.variantLabel && <span className="font-normal" style={{ color: "#5C6B6E" }}> · {l.variantLabel}</span>}</p>
+                <p className="text-xs" style={{ color: "#5C6B6E" }}>{eur(l.unitPrice)}/{l.product.unit}</p>
               </div>
               <div className="flex items-center rounded-md border" style={{ borderColor: "#D9CBB3" }}>
-                <button onClick={() => updateQty(l.productId, l.qty - 1)} className="p-1.5"><Minus size={12} /></button>
+                <button onClick={() => updateQty(l.productId, l.qty - 1, l.variantLabel)} className="p-1.5"><Minus size={12} /></button>
                 <span className="w-6 text-center text-xs">{l.qty}</span>
-                <button onClick={() => updateQty(l.productId, l.qty + 1)} className="p-1.5"><Plus size={12} /></button>
+                <button onClick={() => updateQty(l.productId, l.qty + 1, l.variantLabel)} className="p-1.5"><Plus size={12} /></button>
               </div>
-              <span className="w-16 text-right text-sm font-semibold" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{eur(l.product.price * l.qty)}</span>
-              <button onClick={() => removeFromCart(l.productId)} style={{ color: "#B04A2F" }}><Trash2 size={16} /></button>
+              <span className="w-16 text-right text-sm font-semibold" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{eur(l.unitPrice * l.qty)}</span>
+              <button onClick={() => removeFromCart(l.productId, l.variantLabel)} style={{ color: "#B04A2F" }}><Trash2 size={16} /></button>
             </div>
           ))}
         </div>
@@ -2412,18 +2500,26 @@ function CartView({ lines, updateQty, removeFromCart, total, goTo }) {
 /*  CHECKOUT                                                            */
 /* ------------------------------------------------------------------ */
 
-function CheckoutView({ lines, total, user, placeOrder, goTo }) {
+function CheckoutView({ lines, total, user, placeOrder, goTo, siteSettings }) {
   const [form, setForm] = useState({
     name: user?.role === "comprador" ? user?.name || "" : "",
     email: user?.role === "comprador" ? user?.email || "" : "",
     phone: user?.role === "comprador" ? user?.phone || "" : "",
-    address: "", city: "", postal: "", payment: "tarjeta", ageRange: "",
+    address: "", city: "", postal: "", payment: "tarjeta", ageRange: "", deliveryDate: "",
   });
   const [submitting, setSubmitting] = useState(false);
   const [payError, setPayError] = useState("");
   const weightKg = cartWeightKg(lines);
-  const shipping = shippingCostForWeight(weightKg);
+  const freeShippingThreshold = siteSettings?.freeShippingThreshold ?? 100;
+  const freeShipping = total >= freeShippingThreshold;
+  const shipping = freeShipping ? 0 : shippingCostForWeight(weightKg);
   const grandTotal = total + shipping;
+
+  const minDeliveryDate = useMemo(() => {
+    const d = new Date();
+    d.setDate(d.getDate() + 2); // al menos 2 días, coherente con el envío en frío 24-48h
+    return d.toISOString().slice(0, 10);
+  }, []);
 
   useEffect(() => {
     if (user?.role === "comprador" && user?.email && lines.length > 0) {
@@ -2463,6 +2559,11 @@ function CheckoutView({ lines, total, user, placeOrder, goTo }) {
             <input placeholder="Dirección" value={form.address} onChange={(e) => setForm((f) => ({ ...f, address: e.target.value }))} className="rounded border px-3 py-2 text-sm sm:col-span-2" style={{ borderColor: "#D9CBB3" }} />
             <input placeholder="Ciudad" value={form.city} onChange={(e) => setForm((f) => ({ ...f, city: e.target.value }))} className="rounded border px-3 py-2 text-sm" style={{ borderColor: "#D9CBB3" }} />
             <input placeholder="Código postal" value={form.postal} onChange={(e) => setForm((f) => ({ ...f, postal: e.target.value }))} className="rounded border px-3 py-2 text-sm" style={{ borderColor: "#D9CBB3" }} />
+            <div className="sm:col-span-2">
+              <label className="mb-1 block text-xs font-medium" style={{ color: "#5C6B6E" }}>Día de entrega preferido (opcional)</label>
+              <input type="date" min={minDeliveryDate} value={form.deliveryDate} onChange={(e) => setForm((f) => ({ ...f, deliveryDate: e.target.value }))} className="w-full rounded border px-3 py-2 text-sm" style={{ borderColor: "#D9CBB3" }} />
+              <p className="mt-1 text-[11px]" style={{ color: "#5C6B6E" }}>Intentaremos entregarlo ese día; si no es posible, te avisaremos.</p>
+            </div>
             <select value={form.ageRange} onChange={(e) => setForm((f) => ({ ...f, ageRange: e.target.value }))} className="rounded border px-3 py-2 text-sm sm:col-span-2" style={{ borderColor: "#D9CBB3", color: form.ageRange ? "#16242A" : "#5C6B6E" }}>
               <option value="">Rango de edad (opcional)</option>
               <option value="18-25">18–25</option>
@@ -2507,9 +2608,9 @@ function CheckoutView({ lines, total, user, placeOrder, goTo }) {
         <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide" style={{ color: "#5C6B6E" }}>Tu pedido</h2>
         <div className="flex flex-col gap-2">
           {lines.map((l) => (
-            <div key={l.productId} className="flex justify-between text-xs">
-              <span>{l.qty}× {l.product.name}</span>
-              <span>{eur(l.product.price * l.qty)}</span>
+            <div key={l.productId + (l.variantLabel || "")} className="flex justify-between text-xs">
+              <span>{l.qty}× {l.product.name}{l.variantLabel && ` (${l.variantLabel})`}</span>
+              <span>{eur(l.unitPrice * l.qty)}</span>
             </div>
           ))}
         </div>
@@ -2517,8 +2618,14 @@ function CheckoutView({ lines, total, user, placeOrder, goTo }) {
           <span>Peso estimado</span><span>{weightKg.toFixed(1)} kg</span>
         </div>
         <div className="mt-1 flex justify-between text-sm">
-          <span>Envío</span><span>{eur(shipping)}</span>
+          <span>Envío</span>
+          <span>{freeShipping ? <span style={{ color: "#2F6B5E", fontWeight: 600 }}>Gratis 🎉</span> : eur(shipping)}</span>
         </div>
+        {!freeShipping && (
+          <p className="mt-1 text-[11px]" style={{ color: "#5C6B6E" }}>
+            Añade {eur(freeShippingThreshold - total)} más y el envío te sale gratis.
+          </p>
+        )}
         <div className="mt-1 flex justify-between text-base font-bold">
           <span>Total</span><span style={{ color: "#E85D42" }}>{eur(grandTotal)}</span>
         </div>
@@ -2771,6 +2878,122 @@ function ContactFormView({ goTo }) {
         >
           {sending ? "Enviando…" : "Enviar mensaje"}
         </button>
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  HOSTELERÍA — landing + formulario para bares y restaurantes         */
+/* ------------------------------------------------------------------ */
+
+function HosteleriaView({ goTo }) {
+  const [form, setForm] = useState({ business: "", contactName: "", email: "", phone: "", volume: "", message: "" });
+  const [sending, setSending] = useState(false);
+  const [sent, setSent] = useState(false);
+  const [error, setError] = useState("");
+
+  const canSubmit = form.business.trim() && form.contactName.trim() && form.email.includes("@") && form.phone.trim();
+
+  const submit = async () => {
+    setError("");
+    setSending(true);
+    try {
+      await sendAdminNotification({
+        subject: `Nueva solicitud de hostelería: ${form.business}`,
+        html: `
+          <div style="font-family:sans-serif;max-width:480px;margin:auto">
+            <h2 style="color:#0E3A45">Nueva solicitud de bar/restaurante</h2>
+            <p><strong>Negocio:</strong> ${form.business}</p>
+            <p><strong>Contacto:</strong> ${form.contactName} — ${form.email} — ${form.phone}</p>
+            <p><strong>Volumen estimado:</strong> ${form.volume || "—"}</p>
+            <p style="white-space:pre-wrap">${form.message}</p>
+          </div>`,
+      });
+      setSent(true);
+    } catch (err) {
+      setError("No se pudo enviar la solicitud. Inténtalo de nuevo en unos minutos.");
+    } finally {
+      setSending(false);
+    }
+  };
+
+  if (sent) {
+    return (
+      <div className="mx-auto flex max-w-sm flex-col items-center gap-3 py-20 text-center">
+        <div className="flex h-16 w-16 items-center justify-center rounded-full" style={{ backgroundColor: "#2F6B5E1A" }}>
+          <Check size={30} color="#2F6B5E" />
+        </div>
+        <h2 className="text-xl font-semibold" style={{ fontFamily: "'Fraunces', serif" }}>¡Solicitud enviada!</h2>
+        <p className="text-sm" style={{ color: "#5C6B6E" }}>
+          Nos pondremos en contacto contigo para hablar de precios y condiciones especiales para hostelería.
+        </p>
+        <button onClick={() => goTo("home")} className="mt-2 rounded-md px-4 py-2 text-sm font-semibold text-white" style={{ backgroundColor: "#0E3A45" }}>
+          Volver al inicio
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="mx-auto max-w-2xl py-6">
+      <button onClick={() => goTo("home")} className="mb-4 flex items-center gap-1 text-xs font-medium" style={{ color: "#5C6B6E" }}>
+        <ArrowLeft size={14} /> Volver a LonjaYa
+      </button>
+
+      <div className="mb-6 rounded-xl p-6 sm:p-8" style={{ background: "linear-gradient(120deg,#0E3A45,#173F49)" }}>
+        <span className="text-xs font-semibold tracking-[0.2em]" style={{ color: "#E4D9C4", fontFamily: "'IBM Plex Mono', monospace" }}>
+          LONJAYA PARA HOSTELERÍA
+        </span>
+        <h1 className="mt-2 text-3xl" style={{ fontFamily: "'Fraunces', serif", fontWeight: 600, color: "#F6F8F7" }}>
+          Pescado y marisco para tu bar o restaurante
+        </h1>
+        <p className="mt-3 max-w-lg text-sm" style={{ color: "#C9D6D2" }}>
+          Condiciones especiales para hostelería: pedidos recurrentes, precios por volumen y un contacto directo con tu lonja de confianza.
+        </p>
+      </div>
+
+      <div className="mb-6 grid grid-cols-1 gap-3 sm:grid-cols-3">
+        {[
+          { icon: "📦", title: "Pedidos recurrentes", body: "Programa entregas semanales sin tener que repetir el pedido cada vez." },
+          { icon: "💶", title: "Precios por volumen", body: "Cuanto más compras, mejor precio — hablamos condiciones a medida." },
+          { icon: "📞", title: "Contacto directo", body: "Un interlocutor humano para incidencias urgentes, no un buzón genérico." },
+        ].map((f) => (
+          <div key={f.title} className="rounded-lg border bg-white p-4" style={{ borderColor: "#E4D9C4" }}>
+            <span className="text-2xl">{f.icon}</span>
+            <p className="mt-2 text-sm font-semibold">{f.title}</p>
+            <p className="mt-1 text-xs" style={{ color: "#5C6B6E" }}>{f.body}</p>
+          </div>
+        ))}
+      </div>
+
+      <div className="rounded-lg border bg-white p-5" style={{ borderColor: "#E4D9C4" }}>
+        <h2 className="mb-3 text-sm font-semibold">Cuéntanos sobre tu negocio</h2>
+        <div className="flex flex-col gap-3">
+          <input placeholder="Nombre del negocio" value={form.business} onChange={(e) => setForm((f) => ({ ...f, business: e.target.value }))} className="rounded border px-3 py-2 text-sm" style={{ borderColor: "#D9CBB3" }} />
+          <input placeholder="Persona de contacto" value={form.contactName} onChange={(e) => setForm((f) => ({ ...f, contactName: e.target.value }))} className="rounded border px-3 py-2 text-sm" style={{ borderColor: "#D9CBB3" }} />
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <input type="email" placeholder="Email" value={form.email} onChange={(e) => setForm((f) => ({ ...f, email: e.target.value }))} className="rounded border px-3 py-2 text-sm" style={{ borderColor: "#D9CBB3" }} />
+            <input type="tel" placeholder="Teléfono" value={form.phone} onChange={(e) => setForm((f) => ({ ...f, phone: e.target.value }))} className="rounded border px-3 py-2 text-sm" style={{ borderColor: "#D9CBB3" }} />
+          </div>
+          <select value={form.volume} onChange={(e) => setForm((f) => ({ ...f, volume: e.target.value }))} className="rounded border px-3 py-2 text-sm" style={{ borderColor: "#D9CBB3", color: form.volume ? "#16242A" : "#5C6B6E" }}>
+            <option value="">Volumen estimado semanal (opcional)</option>
+            <option value="menos de 20kg/semana">Menos de 20 kg/semana</option>
+            <option value="20-50kg/semana">20-50 kg/semana</option>
+            <option value="50-150kg/semana">50-150 kg/semana</option>
+            <option value="más de 150kg/semana">Más de 150 kg/semana</option>
+          </select>
+          <textarea placeholder="¿Qué necesitas normalmente?" rows={3} value={form.message} onChange={(e) => setForm((f) => ({ ...f, message: e.target.value }))} className="rounded border px-3 py-2 text-sm" style={{ borderColor: "#D9CBB3" }} />
+          {error && <p className="text-xs font-medium" style={{ color: "#B04A2F" }}>{error}</p>}
+          <button
+            disabled={!canSubmit || sending}
+            onClick={submit}
+            className="rounded-md py-2.5 text-sm font-semibold text-white disabled:opacity-40"
+            style={{ backgroundColor: "#E85D42" }}
+          >
+            {sending ? "Enviando…" : "Solicitar condiciones de hostelería"}
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -3462,6 +3685,44 @@ function StatCard({ icon: Icon, label, value }) {
   );
 }
 
+function VariantsEditor({ variants, onChange }) {
+  const list = variants || [];
+  const [label, setLabel] = useState("");
+  const [price, setPrice] = useState("");
+
+  const add = () => {
+    if (!label.trim() || !price || Number(price) <= 0) return;
+    onChange([...list, { label: label.trim(), price: Number(price) }]);
+    setLabel("");
+    setPrice("");
+  };
+  const remove = (i) => onChange(list.filter((_, idx) => idx !== i));
+
+  return (
+    <div className="rounded-md border p-3" style={{ borderColor: "#D9CBB3" }}>
+      <p className="mb-1 text-xs font-semibold">Tallas / variantes con precio propio (opcional)</p>
+      <p className="mb-2 text-[11px]" style={{ color: "#5C6B6E" }}>
+        Ej. "Talla M (500g)" a 12€, "Talla L (1kg)" a 22€. Si añades alguna, el comprador elegirá entre ellas en vez del precio único de arriba.
+      </p>
+      {list.length > 0 && (
+        <div className="mb-2 flex flex-col gap-1.5">
+          {list.map((v, i) => (
+            <div key={i} className="flex items-center justify-between rounded bg-[#F6F8F7] px-2 py-1 text-xs">
+              <span>{v.label} — {eur(v.price)}</span>
+              <button onClick={() => remove(i)} style={{ color: "#B04A2F" }}><X size={13} /></button>
+            </div>
+          ))}
+        </div>
+      )}
+      <div className="flex gap-2">
+        <input placeholder="Ej. Talla M (500g)" value={label} onChange={(e) => setLabel(e.target.value)} className="flex-1 rounded border px-2 py-1.5 text-xs" style={{ borderColor: "#D9CBB3" }} />
+        <input type="number" step="0.1" placeholder="Precio €" value={price} onChange={(e) => setPrice(e.target.value)} className="w-24 rounded border px-2 py-1.5 text-xs" style={{ borderColor: "#D9CBB3" }} />
+        <button onClick={add} className="rounded-md px-3 py-1.5 text-xs font-semibold text-white" style={{ backgroundColor: "#0E3A45" }}>+</button>
+      </div>
+    </div>
+  );
+}
+
 function ProductEditorModal({ product, categories, onClose, onSave }) {
   const [form, setForm] = useState(product);
   const [uploading, setUploading] = useState(false);
@@ -3536,6 +3797,13 @@ function ProductEditorModal({ product, categories, onClose, onSave }) {
             />
             <p className="mt-1 text-[11px]" style={{ color: "#5C6B6E" }}>Solo rellénalo si de verdad vendías antes a ese precio — así el producto puede aparecer en "Ofertas del día" con el descuento calculado de forma real.</p>
           </div>
+
+          <VariantsEditor variants={form.variants} onChange={(variants) => setForm((f) => ({ ...f, variants }))} />
+
+          <label className="flex items-center gap-2 text-xs font-medium">
+            <input type="checkbox" checked={!!form.seasonal} onChange={(e) => setForm((f) => ({ ...f, seasonal: e.target.checked }))} />
+            🍂 Marcar como "De temporada"
+          </label>
           <div className="grid grid-cols-2 gap-2">
             <input type="number" placeholder="Stock" value={form.stock} onChange={(e) => setForm((f) => ({ ...f, stock: Number(e.target.value) }))} className="rounded border px-3 py-2 text-sm" style={{ borderColor: "#D9CBB3" }} />
             <select value={form.freshness} onChange={(e) => setForm((f) => ({ ...f, freshness: e.target.value }))} className="rounded border px-3 py-2 text-sm" style={{ borderColor: "#D9CBB3" }}>
@@ -3961,6 +4229,7 @@ function HeroMediaAdminSection({ siteSettings, updateSiteSettings }) {
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState("");
   const currentUrl = siteSettings?.heroVideoUrl;
+  const [threshold, setThreshold] = useState(siteSettings?.freeShippingThreshold ?? 100);
 
   const handleUpload = async (e) => {
     const file = e.target.files?.[0];
@@ -4022,6 +4291,28 @@ function HeroMediaAdminSection({ siteSettings, updateSiteSettings }) {
           </label>
         )}
         {error && <p className="mt-2 text-xs font-medium" style={{ color: "#B04A2F" }}>{error}</p>}
+      </div>
+
+      <h2 className="mb-1 mt-6 flex items-center gap-1.5 text-sm font-semibold uppercase tracking-wide" style={{ color: "#5C6B6E" }}>
+        🚚 Envío gratis
+      </h2>
+      <p className="mb-3 text-[11px]" style={{ color: "#5C6B6E" }}>
+        A partir de qué importe de pedido el envío sale gratis para el comprador.
+      </p>
+      <div className="flex items-center gap-2 rounded-lg border bg-white p-4" style={{ borderColor: "#E4D9C4" }}>
+        <span className="text-sm">Gratis a partir de</span>
+        <input
+          type="number" value={threshold} onChange={(e) => setThreshold(Number(e.target.value))}
+          className="w-24 rounded border px-2 py-1.5 text-sm" style={{ borderColor: "#D9CBB3" }}
+        />
+        <span className="text-sm">€</span>
+        <button
+          onClick={() => updateSiteSettings({ freeShippingThreshold: threshold })}
+          className="ml-auto rounded-md px-3 py-1.5 text-xs font-semibold text-white"
+          style={{ backgroundColor: "#0E3A45" }}
+        >
+          Guardar
+        </button>
       </div>
     </div>
   );

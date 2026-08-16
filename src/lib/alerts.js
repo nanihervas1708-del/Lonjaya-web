@@ -52,6 +52,13 @@ export async function claimPendingBonusPoints(buyerEmail) {
   return total;
 }
 
+/* ---------------------------- Boletín de noticias ---------------------------- */
+
+export async function subscribeNewsletter(email) {
+  const { error } = await supabase.from("newsletter_subscribers").insert({ email });
+  if (error && !String(error.message).includes("duplicate")) throw error;
+}
+
 /* ---------------------------- Carrito abandonado (seguimiento) ---------------------------- */
 
 export async function logCheckoutAttempt(email, name, cartSnapshot) {

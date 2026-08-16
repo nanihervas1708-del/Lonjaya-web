@@ -83,6 +83,8 @@ function rowToProduct(r) {
     emoji: r.emoji,
     image: r.image,
     desc: r.description,
+    variants: Array.isArray(r.variants) ? r.variants : null, // [{label, price}]
+    seasonal: !!r.seasonal,
   };
 }
 
@@ -101,6 +103,8 @@ function productToRow(p) {
     emoji: p.emoji || null,
     image: p.image || null,
     description: p.desc || null,
+    variants: p.variants && p.variants.length ? p.variants : null,
+    seasonal: !!p.seasonal,
   };
 }
 
