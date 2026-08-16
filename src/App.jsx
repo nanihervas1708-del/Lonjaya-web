@@ -1941,7 +1941,7 @@ function NewPostForm({ vendors, products, user, addCommunityPost, onDone }) {
   const handlePhoto = async (file) => {
     if (!file) return;
     setUploading(true);
-    try { setForm((f) => ({ ...f, image: await uploadUserMedia(file) })); }
+    try { const url = await uploadUserMedia(file); setForm((f) => ({ ...f, image: url })); }
     catch {} finally { setUploading(false); }
   };
 
@@ -2073,7 +2073,7 @@ function NewRecipeForm({ products, addRecipe, onDone }) {
     if (!file) return;
     const setUploading = kind === "image" ? setUploadingImg : setUploadingVid;
     setUploading(true);
-    try { setForm((f) => ({ ...f, [kind]: await uploadUserMedia(file) })); }
+    try { const url = await uploadUserMedia(file); setForm((f) => ({ ...f, [kind]: url })); }
     catch {} finally { setUploading(false); }
   };
 
