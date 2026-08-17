@@ -423,19 +423,35 @@ function StampBadge({ children }) {
 /*  PANTALLA DE APERTURA                                                */
 /* ------------------------------------------------------------------ */
 
-function SplashScreen({ onEnter, siteSettings, products, vendors }) {
+function SplashScreen({ onEnter, siteSettings, products, vendors, goTo }) {
   const [closing, setClosing] = useState(false);
+  const [tagIndex, setTagIndex] = useState(0);
   const countdown = useMarketCountdown();
   const splashImageUrl = siteSettings?.splashImageUrl;
   const splashSoundUrl = siteSettings?.splashSoundUrl;
 
   const activeVendors = vendors.filter((v) => v.status === "activo");
-  const tagProducts = useMemo(() => {
-    return products
-      .filter((p) => p.freshness === "hoy" && p.stock > 0)
-      .sort((a, b) => b.price - a.price)
-      .slice(0, 2);
+
+  // Bolsa de productos elegibles para las etiquetas (frescos hoy, con stock),
+  // ordenados por precio — se van rotando de 2 en 2 cada 2 minutos.
+  const eligibleProducts = useMemo(() => {
+    return products.filter((p) => p.freshness === "hoy" && p.stock > 0).sort((a, b) => b.price - a.price);
   }, [products]);
+
+  useEffect(() => {
+    if (eligibleProducts.length <= 2) return;
+    const id = setInterval(() => {
+      setTagIndex((i) => (i + 2) % eligibleProducts.length);
+    }, 120000); // cada 2 minutos
+    return () => clearInterval(id);
+  }, [eligibleProducts.length]);
+
+  const tagProducts = useMemo(() => {
+    if (eligibleProducts.length === 0) return [];
+    const a = eligibleProducts[tagIndex % eligibleProducts.length];
+    const b = eligibleProducts[(tagIndex + 1) % eligibleProducts.length];
+    return a && b && a.id !== b.id ? [a, b] : [a].filter(Boolean);
+  }, [eligibleProducts, tagIndex]);
 
   const enter = (withSound) => {
     if (withSound && splashSoundUrl) {
@@ -447,6 +463,14 @@ function SplashScreen({ onEnter, siteSettings, products, vendors }) {
     }
     setClosing(true);
     setTimeout(onEnter, 450);
+  };
+
+  const goToProduct = (productId) => {
+    setClosing(true);
+    setTimeout(() => {
+      onEnter();
+      goTo("product", { productId });
+    }, 450);
   };
 
   return (
@@ -489,24 +513,28 @@ function SplashScreen({ onEnter, siteSettings, products, vendors }) {
         </div>
       </div>
 
-      {/* Etiquetas de precio flotando (productos reales de hoy) */}
+      {/* Etiquetas de precio flotando (productos reales, rotan cada 2 min, clicables) */}
       {tagProducts[0] && (
-        <div
-          className="absolute left-5 top-[22%] rounded-lg bg-white px-4 py-2.5 shadow-xl sm:left-10"
+        <button
+          key={tagProducts[0].id}
+          onClick={() => goToProduct(tagProducts[0].id)}
+          className="absolute left-5 top-[22%] rounded-lg bg-white px-4 py-2.5 text-left shadow-xl transition-transform hover:scale-105 sm:left-10"
           style={{ transform: "rotate(-4deg)", animation: "splashTagIn 0.5s ease-out 0.5s both", borderLeft: "4px solid #E85D42" }}
         >
           <p className="text-xs font-bold" style={{ color: "#16242A" }}>{tagProducts[0].name}</p>
           <p className="text-lg font-bold" style={{ color: "#E85D42" }}>{eur(tagProducts[0].price)}<span className="ml-1 text-[10px] font-normal" style={{ color: "#5C6B6E" }}>/{tagProducts[0].unit}</span></p>
-        </div>
+        </button>
       )}
       {tagProducts[1] && (
-        <div
-          className="absolute right-5 top-[32%] rounded-lg bg-white px-4 py-2.5 shadow-xl sm:right-10"
+        <button
+          key={tagProducts[1].id}
+          onClick={() => goToProduct(tagProducts[1].id)}
+          className="absolute right-5 top-[32%] rounded-lg bg-white px-4 py-2.5 text-left shadow-xl transition-transform hover:scale-105 sm:right-10"
           style={{ transform: "rotate(3deg)", animation: "splashTagIn 0.5s ease-out 0.7s both", borderLeft: "4px solid #E85D42" }}
         >
           <p className="text-xs font-bold" style={{ color: "#16242A" }}>{tagProducts[1].name}</p>
           <p className="text-lg font-bold" style={{ color: "#E85D42" }}>{eur(tagProducts[1].price)}<span className="ml-1 text-[10px] font-normal" style={{ color: "#5C6B6E" }}>/{tagProducts[1].unit}</span></p>
-        </div>
+        </button>
       )}
 
       {/* Titular + CTA, anclados abajo */}
@@ -532,7 +560,7 @@ function SplashScreen({ onEnter, siteSettings, products, vendors }) {
         </div>
 
         {activeVendors.length > 0 && (
-          <p className="mt-4 text-center text-[11px]" style={{ color: "#7C8B8E" }}>
+          <p className="mt-4 text-center text-sm font-medium" style={{ color: "#C9D6D2" }}>
             {activeVendors.length} lonjas verificadas · Envío en frío 24h · Pago seguro
           </p>
         )}
@@ -1210,10 +1238,7 @@ export default function App() {
   if (!ready) {
     return (
       <div className="flex h-screen w-full items-center justify-center" style={{ backgroundColor: "#0E3A45" }}>
-        <div className="flex items-center gap-3 text-[#F6F8F7]" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>
-          <Anchor className="animate-pulse" />
-          <span>Abriendo la lonja…</span>
-        </div>
+        <Anchor className="animate-pulse" color="#F6F8F7" size={32} />
       </div>
     );
   }
@@ -1222,7 +1247,7 @@ export default function App() {
     <div className="min-h-screen w-full" style={{ backgroundColor: "#F6F8F7", color: "#16242A", fontFamily: "'Inter', sans-serif" }}>
       <FontImports />
       {showSplash && (
-        <SplashScreen onEnter={() => setShowSplash(false)} siteSettings={siteSettings} products={products} vendors={vendors} />
+        <SplashScreen onEnter={() => setShowSplash(false)} siteSettings={siteSettings} products={products} vendors={vendors} goTo={goTo} />
       )}
 
       {/* ---------------- TICKER ---------------- */}
