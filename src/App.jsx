@@ -419,8 +419,131 @@ function StampBadge({ children }) {
 /*  APP                                                                 */
 /* ------------------------------------------------------------------ */
 
+/* ------------------------------------------------------------------ */
+/*  PANTALLA DE APERTURA                                                */
+/* ------------------------------------------------------------------ */
+
+function SplashScreen({ onEnter, siteSettings, products, vendors }) {
+  const [closing, setClosing] = useState(false);
+  const countdown = useMarketCountdown();
+  const splashImageUrl = siteSettings?.splashImageUrl;
+  const splashSoundUrl = siteSettings?.splashSoundUrl;
+
+  const activeVendors = vendors.filter((v) => v.status === "activo");
+  const tagProducts = useMemo(() => {
+    return products
+      .filter((p) => p.freshness === "hoy" && p.stock > 0)
+      .sort((a, b) => b.price - a.price)
+      .slice(0, 2);
+  }, [products]);
+
+  const enter = (withSound) => {
+    if (withSound && splashSoundUrl) {
+      try {
+        const audio = new Audio(splashSoundUrl);
+        audio.volume = 0.5;
+        audio.play().catch(() => {});
+      } catch {}
+    }
+    setClosing(true);
+    setTimeout(onEnter, 450);
+  };
+
+  return (
+    <div
+      className="fixed inset-0 z-[100] overflow-hidden transition-opacity duration-500"
+      style={{ opacity: closing ? 0 : 1, pointerEvents: closing ? "none" : "auto" }}
+    >
+      <style>{`
+        @keyframes splashFadeUp { 0% { transform: translateY(16px); opacity: 0; } 100% { transform: translateY(0); opacity: 1; } }
+        @keyframes splashTagIn { 0% { transform: translateY(10px) scale(0.9); opacity: 0; } 100% { transform: translateY(0) scale(1); opacity: 1; } }
+        @keyframes splashPulseDot { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+      `}</style>
+
+      {/* Fondo: foto real subida por el admin, con velo oscuro. Si no hay
+          foto todavía, usamos un degradado de marca como respaldo. */}
+      <div className="absolute inset-0">
+        {splashImageUrl ? (
+          <img src={splashImageUrl} alt="" className="h-full w-full object-cover" />
+        ) : (
+          <div className="h-full w-full" style={{ background: "radial-gradient(circle at 50% 35%, #1E3A40 0%, #082630 75%)" }} />
+        )}
+        <div
+          className="absolute inset-0"
+          style={{ background: "linear-gradient(to bottom, rgba(4,12,15,0.55) 0%, rgba(4,12,15,0.15) 45%, rgba(4,12,15,0.55) 65%, rgba(4,12,15,0.96) 100%)" }}
+        />
+      </div>
+
+      {/* Cabecera: marca + cuenta atrás real de cierre de lonja */}
+      <div className="relative z-10 flex items-center justify-between px-5 pt-5 sm:px-8 sm:pt-6">
+        <div className="flex items-center gap-2">
+          <Anchor size={30} color="#F6F8F7" strokeWidth={1.8} />
+          <span className="text-lg font-semibold" style={{ fontFamily: "'Fraunces', serif", color: "#F6F8F7" }}>LonjaYa</span>
+        </div>
+        <div className="flex items-center gap-1.5 rounded-full px-3 py-2" style={{ backgroundColor: "rgba(0,0,0,0.4)" }}>
+          <span className="h-2 w-2 rounded-full" style={{ backgroundColor: "#E85D42", animation: "splashPulseDot 1.6s ease-in-out infinite" }} />
+          <div className="leading-tight">
+            <p className="text-[9px] font-bold tracking-wide" style={{ color: "#C9D6D2" }}>LA LONJA CIERRA EN</p>
+            <p className="text-sm font-bold" style={{ color: "#F6F8F7", fontFamily: "'IBM Plex Mono', monospace" }}>{countdown.h}:{countdown.m}:{countdown.s}</p>
+          </div>
+        </div>
+      </div>
+
+      {/* Etiquetas de precio flotando (productos reales de hoy) */}
+      {tagProducts[0] && (
+        <div
+          className="absolute left-5 top-[22%] rounded-lg bg-white px-4 py-2.5 shadow-xl sm:left-10"
+          style={{ transform: "rotate(-4deg)", animation: "splashTagIn 0.5s ease-out 0.5s both", borderLeft: "4px solid #E85D42" }}
+        >
+          <p className="text-xs font-bold" style={{ color: "#16242A" }}>{tagProducts[0].name}</p>
+          <p className="text-lg font-bold" style={{ color: "#E85D42" }}>{eur(tagProducts[0].price)}<span className="ml-1 text-[10px] font-normal" style={{ color: "#5C6B6E" }}>/{tagProducts[0].unit}</span></p>
+        </div>
+      )}
+      {tagProducts[1] && (
+        <div
+          className="absolute right-5 top-[32%] rounded-lg bg-white px-4 py-2.5 shadow-xl sm:right-10"
+          style={{ transform: "rotate(3deg)", animation: "splashTagIn 0.5s ease-out 0.7s both", borderLeft: "4px solid #E85D42" }}
+        >
+          <p className="text-xs font-bold" style={{ color: "#16242A" }}>{tagProducts[1].name}</p>
+          <p className="text-lg font-bold" style={{ color: "#E85D42" }}>{eur(tagProducts[1].price)}<span className="ml-1 text-[10px] font-normal" style={{ color: "#5C6B6E" }}>/{tagProducts[1].unit}</span></p>
+        </div>
+      )}
+
+      {/* Titular + CTA, anclados abajo */}
+      <div className="absolute bottom-0 left-0 right-0 z-10 px-6 pb-8 sm:px-10 sm:pb-10" style={{ animation: "splashFadeUp 0.6s ease-out 0.2s both" }}>
+        <h1 className="text-[2.6rem] leading-[1.05] sm:text-6xl" style={{ fontFamily: "'Fraunces', serif", fontWeight: 600, color: "#F6F8F7" }}>
+          El mar,<br />directo a tu mesa.
+        </h1>
+        <p className="mt-3 max-w-sm text-sm" style={{ color: "#D2DEDA" }}>
+          Pescado y marisco recién subastado. Hoy mismo, sin intermediarios.
+        </p>
+
+        <button
+          onClick={() => enter(true)}
+          className="mt-6 w-full rounded-full py-4 text-base font-bold text-white shadow-2xl sm:w-auto sm:px-10"
+          style={{ backgroundColor: "#E85D42" }}
+        >
+          Entrar y comprar hoy →
+        </button>
+
+        <div className="mt-3 flex items-center justify-between text-[11px]" style={{ color: "#9FB0AC" }}>
+          <span>🔊 Con el sonido del puerto</span>
+          <button onClick={() => enter(false)} className="underline">Entrar sin sonido</button>
+        </div>
+
+        {activeVendors.length > 0 && (
+          <p className="mt-4 text-center text-[11px]" style={{ color: "#7C8B8E" }}>
+            {activeVendors.length} lonjas verificadas · Envío en frío 24h · Pago seguro
+          </p>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
   const [ready, setReady] = useState(false);
+  const [showSplash, setShowSplash] = useState(true);
   const [products, setProducts] = useState([]);
   const [vendors, setVendors] = useState([]);
   const [auctions, setAuctions] = useState([]);
@@ -1098,6 +1221,9 @@ export default function App() {
   return (
     <div className="min-h-screen w-full" style={{ backgroundColor: "#F6F8F7", color: "#16242A", fontFamily: "'Inter', sans-serif" }}>
       <FontImports />
+      {showSplash && (
+        <SplashScreen onEnter={() => setShowSplash(false)} siteSettings={siteSettings} products={products} vendors={vendors} />
+      )}
 
       {/* ---------------- TICKER ---------------- */}
       <div className="overflow-hidden whitespace-nowrap py-1.5" style={{ backgroundColor: "#16242A" }}>
@@ -4257,6 +4383,105 @@ function ProductsAdminSection({ products, vendors, upsertProduct }) {
   );
 }
 
+function SplashMediaControls({ siteSettings, updateSiteSettings }) {
+  const [uploadingImg, setUploadingImg] = useState(false);
+  const [uploadingSound, setUploadingSound] = useState(false);
+  const [error, setError] = useState("");
+  const imageUrl = siteSettings?.splashImageUrl;
+  const soundUrl = siteSettings?.splashSoundUrl;
+
+  const handleImage = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (!file.type.startsWith("image/")) { setError("Tiene que ser una imagen."); return; }
+    setError("");
+    setUploadingImg(true);
+    try {
+      const url = await uploadSiteMedia(file);
+      await updateSiteSettings({ splashImageUrl: url });
+    } catch {
+      setError("No se pudo subir la foto.");
+    } finally {
+      setUploadingImg(false);
+      e.target.value = "";
+    }
+  };
+
+  const handleSound = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (!file.type.startsWith("audio/")) { setError("Tiene que ser un archivo de audio (mp3, wav...)."); return; }
+    setError("");
+    setUploadingSound(true);
+    try {
+      const url = await uploadSiteMedia(file);
+      await updateSiteSettings({ splashSoundUrl: url });
+    } catch {
+      setError("No se pudo subir el sonido.");
+    } finally {
+      setUploadingSound(false);
+      e.target.value = "";
+    }
+  };
+
+  return (
+    <div className="mt-6">
+      <h2 className="mb-1 flex items-center gap-1.5 text-sm font-semibold uppercase tracking-wide" style={{ color: "#5C6B6E" }}>
+        🌅 Pantalla de apertura
+      </h2>
+      <p className="mb-3 text-[11px]" style={{ color: "#5C6B6E" }}>
+        Lo primero que ve cualquiera al entrar en lonjaya.com. Sube una foto real (puerto, producto, lonja...) y, si quieres, un sonido que se activa cuando la persona toca para entrar.
+      </p>
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <div className="rounded-lg border bg-white p-4" style={{ borderColor: "#E4D9C4" }}>
+          <p className="mb-2 text-xs font-semibold">Foto de fondo</p>
+          {imageUrl ? (
+            <div className="flex items-center gap-2">
+              <img src={imageUrl} alt="" className="h-16 w-16 rounded-md object-cover" />
+              <div className="flex flex-col gap-1">
+                <label className="inline-flex cursor-pointer items-center gap-1 rounded-md border px-2 py-1 text-[11px] font-medium" style={{ borderColor: "#D9CBB3" }}>
+                  {uploadingImg ? "Subiendo…" : "Cambiar"}
+                  <input type="file" accept="image/*" className="hidden" onChange={handleImage} disabled={uploadingImg} />
+                </label>
+                <button onClick={() => updateSiteSettings({ splashImageUrl: null })} className="text-[11px] font-medium underline" style={{ color: "#B04A2F" }}>Quitar</button>
+              </div>
+            </div>
+          ) : (
+            <label className="flex cursor-pointer flex-col items-center gap-1.5 rounded-md border border-dashed py-5 text-center" style={{ borderColor: "#D9CBB3" }}>
+              <ImagePlus size={18} color="#5C6B6E" />
+              <span className="text-[11px] font-medium" style={{ color: "#5C6B6E" }}>{uploadingImg ? "Subiendo…" : "Subir foto"}</span>
+              <input type="file" accept="image/*" className="hidden" onChange={handleImage} disabled={uploadingImg} />
+            </label>
+          )}
+        </div>
+
+        <div className="rounded-lg border bg-white p-4" style={{ borderColor: "#E4D9C4" }}>
+          <p className="mb-2 text-xs font-semibold">Sonido de apertura (opcional)</p>
+          {soundUrl ? (
+            <div className="flex flex-col gap-2">
+              <audio src={soundUrl} controls className="h-8 w-full" />
+              <div className="flex gap-2">
+                <label className="inline-flex cursor-pointer items-center gap-1 rounded-md border px-2 py-1 text-[11px] font-medium" style={{ borderColor: "#D9CBB3" }}>
+                  {uploadingSound ? "Subiendo…" : "Cambiar"}
+                  <input type="file" accept="audio/*" className="hidden" onChange={handleSound} disabled={uploadingSound} />
+                </label>
+                <button onClick={() => updateSiteSettings({ splashSoundUrl: null })} className="text-[11px] font-medium underline" style={{ color: "#B04A2F" }}>Quitar</button>
+              </div>
+            </div>
+          ) : (
+            <label className="flex cursor-pointer flex-col items-center gap-1.5 rounded-md border border-dashed py-5 text-center" style={{ borderColor: "#D9CBB3" }}>
+              <ImagePlus size={18} color="#5C6B6E" />
+              <span className="text-[11px] font-medium" style={{ color: "#5C6B6E" }}>{uploadingSound ? "Subiendo…" : "Subir sonido (mp3)"}</span>
+              <input type="file" accept="audio/*" className="hidden" onChange={handleSound} disabled={uploadingSound} />
+            </label>
+          )}
+        </div>
+      </div>
+      {error && <p className="mt-2 text-xs font-medium" style={{ color: "#B04A2F" }}>{error}</p>}
+    </div>
+  );
+}
+
 function HeroMediaAdminSection({ siteSettings, updateSiteSettings }) {
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState("");
@@ -4324,6 +4549,8 @@ function HeroMediaAdminSection({ siteSettings, updateSiteSettings }) {
         )}
         {error && <p className="mt-2 text-xs font-medium" style={{ color: "#B04A2F" }}>{error}</p>}
       </div>
+
+      <SplashMediaControls siteSettings={siteSettings} updateSiteSettings={updateSiteSettings} />
 
       <h2 className="mb-1 mt-6 flex items-center gap-1.5 text-sm font-semibold uppercase tracking-wide" style={{ color: "#5C6B6E" }}>
         🚚 Envío gratis
