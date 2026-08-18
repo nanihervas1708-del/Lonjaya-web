@@ -67,7 +67,33 @@ export function buildOrderConfirmationEmail(order) {
   };
 }
 
-/** Email para un vendedor cuando le entra un pedido nuevo (solo sus líneas). */
+/** Email con las instrucciones de pago cuando eligen transferencia o Bizum
+ * (el pedido queda "pendiente de pago" hasta que el admin confirma a mano
+ * que ha recibido el dinero). */
+export function buildPendingPaymentEmail(order, method, payDetails) {
+  const addr = order.shippingAddress || {};
+  const isBizum = method === "bizum";
+  return {
+    subject: `Completa el pago de tu pedido #${order.id.slice(-6)} en LonjaYa`,
+    html: `
+      <div style="font-family:sans-serif;max-width:480px;margin:auto">
+        <h2 style="color:#0E3A45">Ya casi está, ${addr.name || ""}</h2>
+        <p>Tu pedido <strong>#${order.id.slice(-6)}</strong> está reservado. Para confirmarlo, completa el pago de <strong>${order.total.toFixed(2)} €</strong> por ${isBizum ? "Bizum" : "transferencia bancaria"}:</p>
+        <div style="background:#F6F8F7;border-radius:8px;padding:16px;margin:16px 0">
+          ${isBizum
+            ? `<p style="margin:4px 0"><strong>Teléfono Bizum:</strong> ${payDetails.bizumPhone}</p>`
+            : `<p style="margin:4px 0"><strong>IBAN:</strong> ${payDetails.iban}</p>
+               <p style="margin:4px 0"><strong>Titular:</strong> ${payDetails.holder}</p>`}
+          <p style="margin:4px 0"><strong>Importe exacto:</strong> ${order.total.toFixed(2)} €</p>
+          <p style="margin:4px 0"><strong>Concepto (importante, inclúyelo):</strong> LONJAYA-${order.id.slice(-6)}</p>
+        </div>
+        <p>En cuanto se confirme la recepción del pago, te llegará un email con la confirmación definitiva y empezará a prepararse tu pedido.</p>
+        ${BRAND_FOOTER}
+      </div>`,
+  };
+}
+
+/** Email para el vendedor cuando le entra un pedido nuevo (solo sus líneas). */
 export function buildVendorNewOrderEmail(order, vendorLines, vendorName) {
   const totalNet = vendorLines.reduce((s, l) => s + (l.vendorPayout ?? l.price * l.qty), 0);
   return {

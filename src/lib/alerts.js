@@ -14,6 +14,18 @@ export async function createProductAlert(productId, buyerEmail, alertType, refer
 
 /* ---------------------------- Programa de referidos ---------------------------- */
 
+/** Da puntos de regalo a un comprador por su email (los "recoge" la próxima
+ * vez que entre con su cuenta, en cualquier dispositivo) — se reutiliza la
+ * misma ficha que el programa de referidos, con otro motivo. */
+export async function awardBonusPoints(buyerEmail, points, reason) {
+  if (!buyerEmail || !points) return;
+  try {
+    await supabase.from("referral_bonus_ledger").insert({ buyer_email: buyerEmail, points, reason });
+  } catch {
+    // no crítico
+  }
+}
+
 export async function registerReferral(referrerEmail, referredEmail) {
   if (!referrerEmail || !referredEmail || referrerEmail === referredEmail) return;
   const { error } = await supabase.from("referrals").insert({

@@ -7,9 +7,9 @@ import { fetchAuctions, createAuctionRow, cancelAuctionRow, computeCurrentPrice,
 import { fetchFlashOffers, createFlashOffer, deleteFlashOffer, activeOffers } from "./lib/flashOffers";
 import { fetchReviews, submitReview, vendorAverageRating } from "./lib/reviews";
 import { fetchCommunityPosts, createCommunityPost, hideCommunityPost, fetchRecipes, createRecipe, hideRecipe, uploadUserMedia } from "./lib/community";
-import { createProductAlert, registerReferral, completeReferralIfAny, logCheckoutAttempt, markCheckoutConverted, claimPendingBonusPoints, subscribeNewsletter } from "./lib/alerts";
+import { createProductAlert, registerReferral, completeReferralIfAny, logCheckoutAttempt, markCheckoutConverted, claimPendingBonusPoints, subscribeNewsletter, awardBonusPoints } from "./lib/alerts";
 import { isPushSupported, subscribeToPush, unsubscribeFromPush, sendPushNotification } from "./lib/push";
-import { sendEmail, sendAdminNotification, buildOrderConfirmationEmail, buildVendorNewOrderEmail, buildAdminNewVendorEmail } from "./lib/emails";
+import { sendEmail, sendAdminNotification, buildOrderConfirmationEmail, buildVendorNewOrderEmail, buildAdminNewVendorEmail, buildPendingPaymentEmail } from "./lib/emails";
 import { marked } from "marked";
 import { LEGAL_DOCS } from "./lib/legalContent";
 import {
@@ -1049,6 +1049,93 @@ export default function App() {
     return order;
   };
 
+  /* -------- pago por transferencia bancaria o Bizum (confirmación manual) -------- */
+  const placeOrderPendingPayment = async (shippingAddress, method) => {
+    const shippingCost = shippingCostForWeight(cartWeightKg(cartLines));
+    const earnedPoints = Math.round(cartTotal * LOYALTY_CONFIG.pointsPerEuro);
+    const order = {
+      id: "o" + Date.now(),
+      user: user?.name || "Invitado",
+      date: new Date().toISOString(),
+      lines: cartLines.map((l) => {
+        const rate = vendors.find((v) => v.id === l.product.vendorId)?.commissionRate ?? DEFAULT_COMMISSION;
+        const gross = l.unitPrice * l.qty;
+        return {
+          productId: l.productId, name: l.product.name + (l.variantLabel ? ` (${l.variantLabel})` : ""), vendorId: l.product.vendorId, qty: l.qty, unit: l.product.unit, price: l.unitPrice,
+          commissionRate: rate, commission: Math.round(gross * rate * 100) / 100, vendorPayout: Math.round(gross * (1 - rate) * 100) / 100,
+        };
+      }),
+      subtotal: cartTotal,
+      shippingCost,
+      total: cartTotal + shippingCost,
+      shippingAddress,
+      payment: { provider: method }, // "transferencia" | "bizum"
+      status: "pendiente_pago",
+      pointsEarned: earnedPoints,
+    };
+    const next = [order, ...orders];
+    const saved = await saveShared("lonja:orders", next);
+    if (!saved) {
+      showToast("No se pudo reservar tu pedido. Inténtalo de nuevo en unos minutos.");
+      throw new Error("No se pudo guardar el pedido pendiente de pago");
+    }
+    setOrders(next);
+    setCart([]);
+    await savePersonal("lonja:cart", []);
+    setLastOrder(order);
+
+    sendEmail({
+      to: shippingAddress.email,
+      ...buildPendingPaymentEmail(order, method, {
+        iban: siteSettings?.bankTransferIban || "",
+        holder: siteSettings?.bankTransferHolder || "",
+        bizumPhone: siteSettings?.bizumPhone || "",
+      }),
+    });
+
+    goTo("pago-pendiente", {});
+    return order;
+  };
+
+  /* El admin confirma a mano que ha recibido el dinero: en ese momento (y
+   * no antes) se descuenta stock de verdad, se suman puntos y se avisa por
+   * email al comprador y al vendedor — igual que hace PayPal al instante,
+   * solo que aquí lo dispara una persona en vez de la pasarela. */
+  const confirmPendingOrderPayment = async (orderId) => {
+    const order = orders.find((o) => o.id === orderId);
+    if (!order || order.status !== "pendiente_pago") return;
+
+    const confirmedOrder = { ...order, status: "confirmado" };
+    const next = orders.map((o) => (o.id === orderId ? confirmedOrder : o));
+    const saved = await saveShared("lonja:orders", next);
+    if (!saved) {
+      showToast("No se pudo confirmar el pedido, inténtalo de nuevo.");
+      return;
+    }
+    setOrders(next);
+
+    for (const l of confirmedOrder.lines) {
+      try {
+        const { newStock } = await decrementProductStock(l.productId, l.qty);
+        setProducts((prev) => prev.map((p) => (p.id === l.productId ? { ...p, stock: newStock } : p)));
+      } catch {}
+    }
+
+    if (confirmedOrder.pointsEarned > 0 && confirmedOrder.shippingAddress?.email) {
+      awardBonusPoints(confirmedOrder.shippingAddress.email, confirmedOrder.pointsEarned, "order_payment");
+    }
+
+    sendEmail({ to: confirmedOrder.shippingAddress?.email, ...buildOrderConfirmationEmail(confirmedOrder) });
+    const vendorIdsInOrder = [...new Set(confirmedOrder.lines.map((l) => l.vendorId))];
+    for (const vId of vendorIdsInOrder) {
+      const v = vendors.find((x) => x.id === vId);
+      if (!v?.email) continue;
+      const vendorLines = confirmedOrder.lines.filter((l) => l.vendorId === vId);
+      sendEmail({ to: v.email, ...buildVendorNewOrderEmail(confirmedOrder, vendorLines, v.name) });
+    }
+    showToast("Pedido confirmado y comprador avisado");
+  };
+
   /* -------- compra de subastas: reserva a precio bloqueado + pago -------- */
   const reserveAuctionForPurchase = async (auctionId) => {
     if (!user || user.role !== "comprador") {
@@ -1492,7 +1579,7 @@ export default function App() {
           <CartView lines={cartLines} updateQty={updateQty} removeFromCart={removeFromCart} total={cartTotal} goTo={goTo} />
         )}
         {view === "checkout" && (
-          <CheckoutView lines={cartLines} total={cartTotal} user={user} placeOrder={placeOrder} goTo={goTo} siteSettings={siteSettings} />
+          <CheckoutView lines={cartLines} total={cartTotal} user={user} placeOrder={placeOrder} placeOrderPendingPayment={placeOrderPendingPayment} goTo={goTo} siteSettings={siteSettings} />
         )}
         {view === "ofertas-flash" && (
           <FlashOffersView flashOffers={flashOffers} products={products} vendors={vendors} goTo={goTo} addToCart={addToCart} />
@@ -1512,6 +1599,7 @@ export default function App() {
           />
         )}
         {view === "confirm" && <ConfirmView goTo={goTo} order={lastOrder} totalPoints={points} />}
+        {view === "pago-pendiente" && <PendingPaymentView goTo={goTo} order={lastOrder} siteSettings={siteSettings} />}
         {view === "mis-pedidos" && <MyOrdersView orders={orders} user={user} reviews={reviews} addReview={addReview} goTo={goTo} showToast={showToast} />}
         {view === "blog" && (
           <BlogView
@@ -1557,6 +1645,7 @@ export default function App() {
             flashOffers={flashOffers}
             addFlashOffer={addFlashOffer}
             removeFlashOffer={removeFlashOffer}
+            confirmPendingOrderPayment={confirmPendingOrderPayment}
           />
         )}
       </main>
@@ -2812,12 +2901,12 @@ function CartView({ lines, updateQty, removeFromCart, total, goTo }) {
 /*  CHECKOUT                                                            */
 /* ------------------------------------------------------------------ */
 
-function CheckoutView({ lines, total, user, placeOrder, goTo, siteSettings }) {
+function CheckoutView({ lines, total, user, placeOrder, placeOrderPendingPayment, goTo, siteSettings }) {
   const [form, setForm] = useState({
     name: user?.role === "comprador" ? user?.name || "" : "",
     email: user?.role === "comprador" ? user?.email || "" : "",
     phone: user?.role === "comprador" ? user?.phone || "" : "",
-    address: "", city: "", postal: "", payment: "tarjeta", ageRange: "", deliveryDate: "",
+    address: "", city: "", postal: "", payment: "transferencia", ageRange: "", deliveryDate: "",
   });
   const [submitting, setSubmitting] = useState(false);
   const [payError, setPayError] = useState("");
@@ -2893,13 +2982,63 @@ function CheckoutView({ lines, total, user, placeOrder, goTo, siteSettings }) {
               Rellena la dirección de entrega para ver las opciones de pago.
             </p>
           ) : (
-            <PayPalCheckoutButton
-              amount={grandTotal}
-              submitting={submitting}
-              setSubmitting={setSubmitting}
-              onError={setPayError}
-              onSuccess={async (payment) => { await placeOrder(form, payment); }}
-            />
+            <>
+              <div className="mb-3 grid grid-cols-3 gap-2">
+                {[
+                  { id: "paypal", label: "PayPal", disabled: true },
+                  { id: "transferencia", label: "Transferencia" },
+                  { id: "bizum", label: "Bizum" },
+                ].map((m) => (
+                  <button
+                    key={m.id}
+                    disabled={m.disabled}
+                    onClick={() => setForm((f) => ({ ...f, payment: m.id }))}
+                    className="relative rounded-md border py-2 text-xs font-semibold disabled:cursor-not-allowed disabled:opacity-50"
+                    style={{
+                      borderColor: form.payment === m.id ? "#0E3A45" : "#D9CBB3",
+                      backgroundColor: form.payment === m.id ? "#0E3A45" : "white",
+                      color: form.payment === m.id ? "white" : "#16242A",
+                    }}
+                  >
+                    {m.label}
+                    {m.disabled && <span className="mt-0.5 block text-[9px] font-normal" style={{ color: form.payment === m.id ? "#D2DEDA" : "#5C6B6E" }}>No disponible</span>}
+                  </button>
+                ))}
+              </div>
+
+              {form.payment === "paypal" && (
+                <p className="rounded-md border border-dashed p-3 text-xs" style={{ borderColor: "#D9CBB3", color: "#5C6B6E" }}>
+                  El pago con PayPal no está disponible temporalmente. Usa transferencia bancaria o Bizum mientras tanto.
+                </p>
+              )}
+
+              {(form.payment === "transferencia" || form.payment === "bizum") && (
+                <div className="rounded-md border p-3" style={{ borderColor: "#D9CBB3" }}>
+                  <p className="mb-2 text-xs" style={{ color: "#5C6B6E" }}>
+                    Confirma el pedido y te enviaremos por email {form.payment === "bizum" ? "el número de Bizum" : "el IBAN"} y el importe exacto para completar el pago.
+                    El pedido se confirma en cuanto recibamos el ingreso.
+                  </p>
+                  <button
+                    disabled={submitting}
+                    onClick={async () => {
+                      setSubmitting(true);
+                      setPayError("");
+                      try {
+                        await placeOrderPendingPayment(form, form.payment);
+                      } catch (err) {
+                        setPayError("No se pudo reservar el pedido. Inténtalo de nuevo.");
+                      } finally {
+                        setSubmitting(false);
+                      }
+                    }}
+                    className="w-full rounded-md py-2.5 text-sm font-semibold text-white disabled:opacity-50"
+                    style={{ backgroundColor: "#E85D42" }}
+                  >
+                    {submitting ? "Reservando…" : `Confirmar pedido — pagar por ${form.payment === "bizum" ? "Bizum" : "transferencia"}`}
+                  </button>
+                </div>
+              )}
+            </>
           )}
           {payError && <p className="mt-2 text-xs font-medium" style={{ color: "#B04A2F" }}>{payError}</p>}
           <p className="mt-2 flex items-center gap-1 text-[11px]" style={{ color: "#5C6B6E" }}>
@@ -3481,6 +3620,59 @@ function MyOrdersView({ orders, user, reviews, addReview, goTo, showToast }) {
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+function PendingPaymentView({ goTo, order, siteSettings }) {
+  if (!order) {
+    return (
+      <div className="mx-auto max-w-sm py-20 text-center">
+        <button onClick={() => goTo("home")} className="rounded-md px-4 py-2 text-sm font-semibold text-white" style={{ backgroundColor: "#0E3A45" }}>Volver al inicio</button>
+      </div>
+    );
+  }
+  const isBizum = order.payment?.provider === "bizum";
+  return (
+    <div className="mx-auto max-w-md py-10 text-center">
+      <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-full" style={{ backgroundColor: "#B0890022" }}>
+        <Clock size={30} color="#B08900" />
+      </div>
+      <h1 className="text-xl font-semibold" style={{ fontFamily: "'Fraunces', serif" }}>Pedido reservado — falta el pago</h1>
+      <p className="mt-2 text-sm" style={{ color: "#5C6B6E" }}>
+        Pedido <strong>#{order.id.slice(-6)}</strong>. Completa el pago con estos datos y confirmaremos tu pedido en cuanto lo recibamos.
+      </p>
+
+      <div className="mt-5 rounded-lg border bg-white p-5 text-left" style={{ borderColor: "#E4D9C4" }}>
+        {isBizum ? (
+          <div className="mb-2">
+            <p className="text-xs font-semibold" style={{ color: "#5C6B6E" }}>Teléfono Bizum</p>
+            <p className="text-lg font-bold" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{siteSettings?.bizumPhone || "—"}</p>
+          </div>
+        ) : (
+          <>
+            <div className="mb-2">
+              <p className="text-xs font-semibold" style={{ color: "#5C6B6E" }}>IBAN</p>
+              <p className="text-base font-bold" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{siteSettings?.bankTransferIban || "—"}</p>
+            </div>
+            <div className="mb-2">
+              <p className="text-xs font-semibold" style={{ color: "#5C6B6E" }}>Titular</p>
+              <p className="text-sm">{siteSettings?.bankTransferHolder || "—"}</p>
+            </div>
+          </>
+        )}
+        <div className="mb-2">
+          <p className="text-xs font-semibold" style={{ color: "#5C6B6E" }}>Importe exacto</p>
+          <p className="text-lg font-bold" style={{ color: "#E85D42" }}>{eur(order.total)}</p>
+        </div>
+        <div>
+          <p className="text-xs font-semibold" style={{ color: "#5C6B6E" }}>Concepto (inclúyelo, es importante)</p>
+          <p className="text-sm font-bold" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>LONJAYA-{order.id.slice(-6)}</p>
+        </div>
+      </div>
+
+      <p className="mt-4 text-xs" style={{ color: "#5C6B6E" }}>Te hemos enviado estos mismos datos por email, por si los necesitas más tarde.</p>
+      <button onClick={() => goTo("home")} className="mt-5 rounded-md px-4 py-2 text-sm font-semibold text-white" style={{ backgroundColor: "#0E3A45" }}>Volver al inicio</button>
     </div>
   );
 }
@@ -4147,6 +4339,51 @@ function ProductEditorModal({ product, categories, onClose, onSave }) {
 /*  INFORME DE VENTAS DIARIAS                                           */
 /* ------------------------------------------------------------------ */
 
+function PendingPaymentsAdminSection({ orders, vendors, confirmPendingOrderPayment }) {
+  const [confirmingId, setConfirmingId] = useState(null);
+  const pending = orders.filter((o) => o.status === "pendiente_pago");
+
+  if (pending.length === 0) return null;
+
+  const confirm = async (id) => {
+    setConfirmingId(id);
+    await confirmPendingOrderPayment(id);
+    setConfirmingId(null);
+  };
+
+  return (
+    <div className="mb-8">
+      <h2 className="mb-1 flex items-center gap-1.5 text-sm font-semibold uppercase tracking-wide" style={{ color: "#B08900" }}>
+        ⏳ Pedidos pendientes de pago ({pending.length})
+      </h2>
+      <p className="mb-3 text-[11px]" style={{ color: "#5C6B6E" }}>
+        Pagos por transferencia o Bizum. En cuanto veas el ingreso en tu cuenta, confírmalo aquí — no antes.
+      </p>
+      <div className="flex flex-col gap-2">
+        {pending.map((o) => (
+          <div key={o.id} className="flex flex-wrap items-center gap-3 rounded-lg border p-3" style={{ borderColor: "#B08900", backgroundColor: "#B0890010" }}>
+            <div className="flex-1">
+              <p className="text-xs font-semibold">Pedido #{o.id.slice(-6)} · {o.shippingAddress?.name}</p>
+              <p className="text-[11px]" style={{ color: "#5C6B6E" }}>
+                {o.payment?.provider === "bizum" ? "Bizum" : "Transferencia"} · Concepto: LONJAYA-{o.id.slice(-6)} · {new Date(o.date).toLocaleDateString("es-ES")}
+              </p>
+            </div>
+            <span className="text-sm font-bold" style={{ color: "#E85D42", fontFamily: "'IBM Plex Mono', monospace" }}>{eur(o.total)}</span>
+            <button
+              disabled={confirmingId === o.id}
+              onClick={() => confirm(o.id)}
+              className="rounded-md px-3 py-1.5 text-xs font-semibold text-white disabled:opacity-50"
+              style={{ backgroundColor: "#2F6B5E" }}
+            >
+              {confirmingId === o.id ? "Confirmando…" : "✓ He recibido el pago"}
+            </button>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function DailySalesReport({ orders, vendors }) {
   const days = useMemo(() => {
     const byDate = new Map();
@@ -4727,6 +4964,40 @@ function SplashMediaControls({ siteSettings, updateSiteSettings }) {
   );
 }
 
+function PaymentDetailsControls({ siteSettings, updateSiteSettings }) {
+  const [iban, setIban] = useState(siteSettings?.bankTransferIban || "");
+  const [holder, setHolder] = useState(siteSettings?.bankTransferHolder || "");
+  const [bizumPhone, setBizumPhone] = useState(siteSettings?.bizumPhone || "");
+  const [saved, setSaved] = useState(false);
+
+  const save = async () => {
+    await updateSiteSettings({ bankTransferIban: iban, bankTransferHolder: holder, bizumPhone });
+    setSaved(true);
+    setTimeout(() => setSaved(false), 2000);
+  };
+
+  return (
+    <div className="mt-6">
+      <h2 className="mb-1 flex items-center gap-1.5 text-sm font-semibold uppercase tracking-wide" style={{ color: "#5C6B6E" }}>
+        💳 Pago por transferencia y Bizum
+      </h2>
+      <p className="mb-3 text-[11px]" style={{ color: "#5C6B6E" }}>
+        Estos datos se le muestran al comprador cuando elige pagar por transferencia o Bizum en vez de PayPal. Recuerda: esos pedidos quedan "pendientes de pago" hasta que los confirmes tú a mano más abajo, en cuanto veas el ingreso.
+      </p>
+      <div className="rounded-lg border bg-white p-4" style={{ borderColor: "#E4D9C4" }}>
+        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+          <input placeholder="IBAN (para transferencias)" value={iban} onChange={(e) => setIban(e.target.value)} className="rounded border px-3 py-2 text-sm" style={{ borderColor: "#D9CBB3" }} />
+          <input placeholder="Nombre del titular de la cuenta" value={holder} onChange={(e) => setHolder(e.target.value)} className="rounded border px-3 py-2 text-sm" style={{ borderColor: "#D9CBB3" }} />
+          <input placeholder="Teléfono para Bizum" value={bizumPhone} onChange={(e) => setBizumPhone(e.target.value)} className="rounded border px-3 py-2 text-sm sm:col-span-2" style={{ borderColor: "#D9CBB3" }} />
+        </div>
+        <button onClick={save} className="mt-3 rounded-md px-3 py-1.5 text-xs font-semibold text-white" style={{ backgroundColor: "#0E3A45" }}>
+          {saved ? "✓ Guardado" : "Guardar datos de pago"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function HeroMediaAdminSection({ siteSettings, updateSiteSettings }) {
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState("");
@@ -4818,11 +5089,13 @@ function HeroMediaAdminSection({ siteSettings, updateSiteSettings }) {
           Guardar
         </button>
       </div>
+
+      <PaymentDetailsControls siteSettings={siteSettings} updateSiteSettings={updateSiteSettings} />
     </div>
   );
 }
 
-function AdminView({ vendors, products, orders, auctions, createAuction, cancelAuction, setVendorStatus, setVendorCommission, addVendor, siteSettings, updateSiteSettings, upsertProduct, flashOffers, addFlashOffer, removeFlashOffer }) {
+function AdminView({ vendors, products, orders, auctions, createAuction, cancelAuction, setVendorStatus, setVendorCommission, addVendor, siteSettings, updateSiteSettings, upsertProduct, flashOffers, addFlashOffer, removeFlashOffer, confirmPendingOrderPayment }) {
   const [showNew, setShowNew] = useState(false);
   const [analytics, setAnalytics] = useState(null);
   const [analyticsLoading, setAnalyticsLoading] = useState(true);
@@ -4991,6 +5264,9 @@ function AdminView({ vendors, products, orders, auctions, createAuction, cancelA
           </>
         )}
       </div>
+
+      {/* PEDIDOS PENDIENTES DE PAGO (transferencia/Bizum) */}
+      <PendingPaymentsAdminSection orders={orders} vendors={vendors} confirmPendingOrderPayment={confirmPendingOrderPayment} />
 
       {/* VENTAS DIARIAS */}
       <DailySalesReport orders={orders} vendors={vendors} />
