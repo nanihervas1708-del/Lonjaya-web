@@ -4,6 +4,7 @@ import { trackPageView, trackProductView, trackSearch, trackHeartbeat, fetchAnal
 import { signIn, signUpVendor, signUpBuyer, signOut, getAuthSession, onAuthChange, isVendorAccount, isBuyerAccount } from "./lib/auth";
 import { fetchVendors, fetchProducts, upsertVendorRow, bulkInsertVendors, upsertProductRow, bulkInsertProducts, deleteProductRow, decrementProductStock, searchProductsFuzzy } from "./lib/marketplace";
 import { fetchAuctions, createAuctionRow, cancelAuctionRow, computeCurrentPrice, reserveAuction, confirmAuctionSale, releaseAuctionReservation } from "./lib/auctions";
+import { fetchFlashOffers, createFlashOffer, deleteFlashOffer, activeOffers } from "./lib/flashOffers";
 import { fetchReviews, submitReview, vendorAverageRating } from "./lib/reviews";
 import { fetchCommunityPosts, createCommunityPost, hideCommunityPost, fetchRecipes, createRecipe, hideRecipe, uploadUserMedia } from "./lib/community";
 import { createProductAlert, registerReferral, completeReferralIfAny, logCheckoutAttempt, markCheckoutConverted, claimPendingBonusPoints, subscribeNewsletter } from "./lib/alerts";
@@ -575,6 +576,7 @@ export default function App() {
   const [products, setProducts] = useState([]);
   const [vendors, setVendors] = useState([]);
   const [auctions, setAuctions] = useState([]);
+  const [flashOffers, setFlashOffers] = useState([]);
   const [siteSettings, setSiteSettings] = useState({});
   const [reviews, setReviews] = useState([]);
   const [communityPosts, setCommunityPosts] = useState([]);
@@ -634,6 +636,8 @@ export default function App() {
       try { posts = await fetchCommunityPosts(); } catch {}
       let recs = [];
       try { recs = await fetchRecipes(); } catch {}
+      let flash = [];
+      try { flash = await fetchFlashOffers(); } catch {}
 
       // Admin y vendedor nunca se restauran desde el almacenamiento "demo":
       // dependen de la sesión real de Supabase Auth (ver useEffect de abajo).
@@ -641,7 +645,7 @@ export default function App() {
       const sessionUser = await getAuthSession();
       setAuthUser(sessionUser);
 
-      setProducts(p); setVendors(v); setOrders(o); setCart(c); setUser(u); setPoints(pts); setAuctions(auc); setSiteSettings(settings); setReviews(rv); setCommunityPosts(posts); setRecipes(recs);
+      setProducts(p); setVendors(v); setOrders(o); setCart(c); setUser(u); setPoints(pts); setAuctions(auc); setSiteSettings(settings); setReviews(rv); setCommunityPosts(posts); setRecipes(recs); setFlashOffers(flash);
       setReady(true);
       trackPageView("home");
     })();
@@ -917,6 +921,27 @@ export default function App() {
       setAuctions((prev) => prev.map((a) => (a.id === id ? { ...a, status: "cancelada" } : a)));
     } catch (err) {
       showToast("No se pudo cancelar la subasta");
+    }
+  };
+
+  /* -------- ofertas flash (solo admin) -------- */
+  const addFlashOffer = async ({ productId, vendorId, offerPrice, endsAt }) => {
+    try {
+      const id = await createFlashOffer({ productId, vendorId, offerPrice, endsAt });
+      setFlashOffers((prev) => [...prev, { id, productId, vendorId, offerPrice, startsAt: new Date().toISOString(), endsAt, createdAt: new Date().toISOString() }]);
+      showToast("Oferta flash creada");
+      return true;
+    } catch (err) {
+      showToast("No se pudo crear la oferta flash");
+      return false;
+    }
+  };
+  const removeFlashOffer = async (id) => {
+    try {
+      await deleteFlashOffer(id);
+      setFlashOffers((prev) => prev.filter((o) => o.id !== id));
+    } catch {
+      showToast("No se pudo quitar la oferta");
     }
   };
 
@@ -1235,6 +1260,15 @@ export default function App() {
     [storefrontProducts]
   );
 
+  if (showSplash) {
+    return (
+      <>
+        <FontImports />
+        <SplashScreen onEnter={() => setShowSplash(false)} siteSettings={siteSettings} products={products} vendors={vendors} goTo={goTo} />
+      </>
+    );
+  }
+
   if (!ready) {
     return (
       <div className="flex h-screen w-full items-center justify-center" style={{ backgroundColor: "#0E3A45" }}>
@@ -1246,9 +1280,6 @@ export default function App() {
   return (
     <div className="min-h-screen w-full" style={{ backgroundColor: "#F6F8F7", color: "#16242A", fontFamily: "'Inter', sans-serif" }}>
       <FontImports />
-      {showSplash && (
-        <SplashScreen onEnter={() => setShowSplash(false)} siteSettings={siteSettings} products={products} vendors={vendors} goTo={goTo} />
-      )}
 
       {/* ---------------- TICKER ---------------- */}
       <div className="overflow-hidden whitespace-nowrap py-1.5" style={{ backgroundColor: "#16242A" }}>
@@ -1388,6 +1419,13 @@ export default function App() {
             ⚡ Subastas
           </button>
           <button
+            onClick={() => goTo("ofertas-flash")}
+            className="shrink-0 rounded px-3 py-1.5 text-xs font-semibold tracking-wide"
+            style={{ color: "#E85D42", backgroundColor: view === "ofertas-flash" ? "#1A4650" : "transparent" }}
+          >
+            🔥 Ofertas Flash
+          </button>
+          <button
             onClick={() => goTo("blog")}
             className="shrink-0 rounded px-3 py-1.5 text-xs font-semibold tracking-wide"
             style={{ color: "#F6F8F7", backgroundColor: view === "blog" ? "#1A4650" : "transparent" }}
@@ -1456,6 +1494,9 @@ export default function App() {
         {view === "checkout" && (
           <CheckoutView lines={cartLines} total={cartTotal} user={user} placeOrder={placeOrder} goTo={goTo} siteSettings={siteSettings} />
         )}
+        {view === "ofertas-flash" && (
+          <FlashOffersView flashOffers={flashOffers} products={products} vendors={vendors} goTo={goTo} addToCart={addToCart} />
+        )}
         {view === "subastas" && (
           <AuctionsView
             auctions={auctions} products={products} vendors={vendors} user={user}
@@ -1513,6 +1554,9 @@ export default function App() {
             siteSettings={siteSettings}
             updateSiteSettings={updateSiteSettings}
             upsertProduct={upsertProduct}
+            flashOffers={flashOffers}
+            addFlashOffer={addFlashOffer}
+            removeFlashOffer={removeFlashOffer}
           />
         )}
       </main>
@@ -2445,6 +2489,91 @@ function RecipesView({ recipes, products, user, addRecipe, isAdmin, adminHideRec
       ) : (
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {recipes.map((r) => <RecipeCard key={r.id} recipe={r} isAdmin={isAdmin} adminHideRecipe={adminHideRecipe} />)}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+
+/* ------------------------------------------------------------------ */
+/*  OFERTAS FLASH — con caducidad real                                  */
+/* ------------------------------------------------------------------ */
+
+function useCountdownTo(endsAt) {
+  const [, tick] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => tick((t) => t + 1), 1000);
+    return () => clearInterval(id);
+  }, []);
+  const remaining = Math.max(0, new Date(endsAt).getTime() - Date.now());
+  const h = String(Math.floor(remaining / 3600000)).padStart(2, "0");
+  const m = String(Math.floor((remaining % 3600000) / 60000)).padStart(2, "0");
+  const s = String(Math.floor((remaining % 60000) / 1000)).padStart(2, "0");
+  return { h, m, s, expired: remaining <= 0 };
+}
+
+function FlashOfferCard({ offer, product, vendor, goTo, addToCart }) {
+  const { h, m, s, expired } = useCountdownTo(offer.endsAt);
+  if (expired || !product) return null;
+  const pct = Math.round((1 - offer.offerPrice / product.price) * 100);
+
+  return (
+    <div className="overflow-hidden rounded-xl border bg-white" style={{ borderColor: "#E4D9C4" }}>
+      <button onClick={() => goTo("product", { productId: product.id })} className="block w-full text-left">
+        <div className="flex h-36 items-center justify-center overflow-hidden text-6xl" style={{ background: "linear-gradient(160deg,#EAF2EF,#DCEAE3)" }}>
+          {product.image ? <img src={product.image} alt={product.name} className="h-full w-full object-cover" /> : product.emoji}
+        </div>
+        <div className="p-3">
+          <p className="text-xs" style={{ color: "#5C6B6E" }}>{vendor?.name}</p>
+          <h3 className="text-sm font-semibold" style={{ fontFamily: "'Fraunces', serif" }}>{product.name}</h3>
+          <div className="mt-1.5 flex items-baseline gap-1.5">
+            <span className="text-lg font-bold" style={{ color: "#E85D42", fontFamily: "'IBM Plex Mono', monospace" }}>{eur(offer.offerPrice)}</span>
+            <span className="text-xs line-through" style={{ color: "#7C8B8E" }}>{eur(product.price)}</span>
+            {pct > 0 && <span className="rounded px-1.5 py-0.5 text-[10px] font-bold text-white" style={{ backgroundColor: "#E85D42" }}>-{pct}%</span>}
+          </div>
+        </div>
+      </button>
+      <div className="flex items-center justify-between border-t px-3 py-2" style={{ borderColor: "#EFEAE0" }}>
+        <span className="flex items-center gap-1 text-xs font-bold" style={{ color: "#B04A2F" }}>
+          ⏱ Termina en {h}:{m}:{s}
+        </span>
+        <button
+          onClick={() => addToCart(product.id, 1)}
+          disabled={product.stock <= 0}
+          className="rounded-md px-3 py-1.5 text-xs font-semibold text-white disabled:opacity-40"
+          style={{ backgroundColor: "#0E3A45" }}
+        >
+          {product.stock <= 0 ? "Agotado" : "Añadir"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function FlashOffersView({ flashOffers, products, vendors, goTo, addToCart }) {
+  const live = activeOffers(flashOffers).sort((a, b) => new Date(a.endsAt) - new Date(b.endsAt));
+
+  return (
+    <div>
+      <h1 className="mb-1 text-xl font-semibold" style={{ fontFamily: "'Fraunces', serif" }}>⚡ Ofertas flash</h1>
+      <p className="mb-6 text-sm" style={{ color: "#5C6B6E" }}>Precio rebajado por tiempo limitado — cuando se acaba la cuenta atrás, se acaba la oferta.</p>
+
+      {live.length === 0 ? (
+        <div className="rounded-lg border border-dashed py-16 text-center text-sm" style={{ borderColor: "#D9CBB3", color: "#5C6B6E" }}>
+          No hay ninguna oferta flash activa ahora mismo. Vuelve más tarde.
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-3">
+          {live.map((o) => (
+            <FlashOfferCard
+              key={o.id} offer={o}
+              product={products.find((p) => p.id === o.productId)}
+              vendor={vendors.find((v) => v.id === o.vendorId)}
+              goTo={goTo} addToCart={addToCart}
+            />
+          ))}
         </div>
       )}
     </div>
@@ -4119,6 +4248,97 @@ function DailySalesReport({ orders, vendors }) {
 /*  SUBASTAS — ADMIN                                                    */
 /* ------------------------------------------------------------------ */
 
+/* ------------------------------------------------------------------ */
+/*  OFERTAS FLASH — ADMIN                                               */
+/* ------------------------------------------------------------------ */
+
+function FlashOffersAdminSection({ vendors, products, flashOffers, addFlashOffer, removeFlashOffer }) {
+  const [form, setForm] = useState({ productId: "", offerPrice: "", durationHours: 3 });
+  const [submitting, setSubmitting] = useState(false);
+  const selectedProduct = products.find((p) => p.id === form.productId);
+  const canSubmit = form.productId && form.offerPrice && Number(form.offerPrice) > 0 && selectedProduct && Number(form.offerPrice) < selectedProduct.price;
+
+  const submit = async () => {
+    setSubmitting(true);
+    const endsAt = new Date(Date.now() + Number(form.durationHours) * 3600000).toISOString();
+    const ok = await addFlashOffer({ productId: form.productId, vendorId: selectedProduct.vendorId, offerPrice: Number(form.offerPrice), endsAt });
+    setSubmitting(false);
+    if (ok) setForm({ productId: "", offerPrice: "", durationHours: 3 });
+  };
+
+  const live = activeOffers(flashOffers);
+
+  return (
+    <div className="mb-8">
+      <h2 className="mb-1 flex items-center gap-1.5 text-sm font-semibold uppercase tracking-wide" style={{ color: "#5C6B6E" }}>
+        ⚡ Ofertas flash
+      </h2>
+      <p className="mb-3 text-[11px]" style={{ color: "#5C6B6E" }}>Descuento con caducidad real — cuando pasa la hora de fin, desaparece sola de la tienda.</p>
+
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+        <div className="rounded-lg border bg-white p-4" style={{ borderColor: "#E4D9C4" }}>
+          <p className="mb-3 text-xs font-semibold">Nueva oferta flash</p>
+          <select value={form.productId} onChange={(e) => setForm((f) => ({ ...f, productId: e.target.value }))} className="mb-2 w-full rounded border px-3 py-2 text-sm" style={{ borderColor: "#D9CBB3" }}>
+            <option value="">Elige un producto…</option>
+            {products.map((p) => {
+              const v = vendors.find((x) => x.id === p.vendorId);
+              return <option key={p.id} value={p.id}>{p.name} — {v?.name} ({eur(p.price)})</option>;
+            })}
+          </select>
+          <div className="grid grid-cols-2 gap-2">
+            <input
+              type="number" step="0.1" placeholder="Precio con oferta €"
+              value={form.offerPrice} onChange={(e) => setForm((f) => ({ ...f, offerPrice: e.target.value }))}
+              className="rounded border px-3 py-2 text-sm" style={{ borderColor: "#D9CBB3" }}
+            />
+            <select value={form.durationHours} onChange={(e) => setForm((f) => ({ ...f, durationHours: e.target.value }))} className="rounded border px-3 py-2 text-sm" style={{ borderColor: "#D9CBB3" }}>
+              <option value={1}>Dura 1 hora</option>
+              <option value={3}>Dura 3 horas</option>
+              <option value={6}>Dura 6 horas</option>
+              <option value={24}>Dura 24 horas</option>
+            </select>
+          </div>
+          {selectedProduct && form.offerPrice && Number(form.offerPrice) >= selectedProduct.price && (
+            <p className="mt-2 text-[11px] font-medium" style={{ color: "#B04A2F" }}>El precio de oferta debe ser menor que el precio normal ({eur(selectedProduct.price)}).</p>
+          )}
+          <button
+            disabled={!canSubmit || submitting}
+            onClick={submit}
+            className="mt-3 w-full rounded-md py-2.5 text-sm font-semibold text-white disabled:opacity-40"
+            style={{ backgroundColor: "#E85D42" }}
+          >
+            {submitting ? "Creando…" : "Lanzar oferta flash"}
+          </button>
+        </div>
+
+        <div className="rounded-lg border bg-white p-4" style={{ borderColor: "#E4D9C4" }}>
+          <p className="mb-3 text-xs font-semibold">Ofertas activas ({live.length})</p>
+          {live.length === 0 ? (
+            <p className="text-xs" style={{ color: "#5C6B6E" }}>No hay ninguna oferta flash activa.</p>
+          ) : (
+            <div className="flex flex-col gap-2">
+              {live.map((o) => {
+                const p = products.find((x) => x.id === o.productId);
+                return (
+                  <div key={o.id} className="flex items-center gap-3 rounded-md border p-2" style={{ borderColor: "#EFEAE0" }}>
+                    <span className="text-xl">{p?.emoji || "🐟"}</span>
+                    <div className="flex-1">
+                      <p className="text-xs font-semibold">{p?.name}</p>
+                      <p className="text-[11px]" style={{ color: "#5C6B6E" }}>Termina: {new Date(o.endsAt).toLocaleString("es-ES", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}</p>
+                    </div>
+                    <span className="text-sm font-bold" style={{ color: "#E85D42", fontFamily: "'IBM Plex Mono', monospace" }}>{eur(o.offerPrice)}</span>
+                    <button onClick={() => removeFlashOffer(o.id)} className="rounded p-1.5" style={{ color: "#B04A2F" }}><Trash2 size={14} /></button>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function AuctionsAdminSection({ vendors, products, auctions, createAuction, cancelAuction }) {
   useAuctionTick();
   const [form, setForm] = useState({ productId: "", startPrice: "", minPrice: "", stepAmount: "", stepSeconds: 180, image: null });
@@ -4602,20 +4822,38 @@ function HeroMediaAdminSection({ siteSettings, updateSiteSettings }) {
   );
 }
 
-function AdminView({ vendors, products, orders, auctions, createAuction, cancelAuction, setVendorStatus, setVendorCommission, addVendor, siteSettings, updateSiteSettings, upsertProduct }) {
+function AdminView({ vendors, products, orders, auctions, createAuction, cancelAuction, setVendorStatus, setVendorCommission, addVendor, siteSettings, updateSiteSettings, upsertProduct, flashOffers, addFlashOffer, removeFlashOffer }) {
   const [showNew, setShowNew] = useState(false);
   const [analytics, setAnalytics] = useState(null);
   const [analyticsLoading, setAnalyticsLoading] = useState(true);
+  const [lastUpdated, setLastUpdated] = useState(null);
   const totalRevenue = orders.reduce((s, o) => s + o.total, 0);
   const totalCommission = orders.reduce((s, o) => s + o.lines.reduce((s2, l) => s2 + (l.commission ?? 0), 0), 0);
   const pending = vendors.filter((v) => v.status === "pendiente");
   const active = vendors.filter((v) => v.status !== "pendiente");
 
-  useEffect(() => {
+  const loadAnalytics = useCallback((showSpinner = false) => {
+    if (showSpinner) setAnalyticsLoading(true);
     fetchAnalyticsSummary(30)
-      .then(setAnalytics)
+      .then((data) => {
+        setAnalytics(data);
+        setLastUpdated(new Date());
+      })
       .finally(() => setAnalyticsLoading(false));
   }, []);
+
+  useEffect(() => {
+    loadAnalytics(true);
+    // Refresco automático cada 5 minutos mientras el panel esté abierto,
+    // y también cada vez que vuelves a esta pestaña tras estar en otra.
+    const interval = setInterval(() => loadAnalytics(false), 5 * 60 * 1000);
+    const onVisible = () => { if (document.visibilityState === "visible") loadAnalytics(false); };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [loadAnalytics]);
 
   const ageBreakdown = useMemo(() => {
     const counts = new Map();
@@ -4653,10 +4891,28 @@ function AdminView({ vendors, products, orders, auctions, createAuction, cancelA
 
       {/* ANALÍTICA DE VISITAS */}
       <div className="mb-8">
-        <h2 className="mb-1 flex items-center gap-1.5 text-sm font-semibold uppercase tracking-wide" style={{ color: "#5C6B6E" }}>
-          <TrendingUp size={13} /> Analítica de visitas (últimos 30 días)
-        </h2>
-        {analyticsLoading ? (
+        <div className="mb-1 flex flex-wrap items-center justify-between gap-2">
+          <h2 className="flex items-center gap-1.5 text-sm font-semibold uppercase tracking-wide" style={{ color: "#5C6B6E" }}>
+            <TrendingUp size={13} /> Analítica de visitas (últimos 30 días)
+          </h2>
+          <div className="flex items-center gap-2">
+            {lastUpdated && (
+              <span className="text-[11px]" style={{ color: "#7C8B8E" }}>
+                Actualizado a las {lastUpdated.toLocaleTimeString("es-ES", { hour: "2-digit", minute: "2-digit" })}
+              </span>
+            )}
+            <button
+              onClick={() => loadAnalytics(true)}
+              disabled={analyticsLoading}
+              className="rounded-md border px-2 py-1 text-[11px] font-medium disabled:opacity-50"
+              style={{ borderColor: "#D9CBB3", color: "#5C6B6E" }}
+            >
+              {analyticsLoading ? "Actualizando…" : "🔄 Actualizar ahora"}
+            </button>
+          </div>
+        </div>
+        <p className="mb-2 text-[10px]" style={{ color: "#9FB0AC" }}>Se refresca sola cada 5 minutos mientras tengas esta pantalla abierta.</p>
+        {analyticsLoading && !analytics ? (
           <p className="text-xs" style={{ color: "#5C6B6E" }}>Cargando…</p>
         ) : !analytics?.hasAccess ? (
           <p className="rounded-lg border border-dashed p-3 text-xs" style={{ borderColor: "#D9CBB3", color: "#5C6B6E" }}>
@@ -4741,6 +4997,9 @@ function AdminView({ vendors, products, orders, auctions, createAuction, cancelA
 
       {/* SUBASTAS */}
       <AuctionsAdminSection vendors={vendors} products={products} auctions={auctions} createAuction={createAuction} cancelAuction={cancelAuction} />
+
+      {/* OFERTAS FLASH */}
+      <FlashOffersAdminSection vendors={vendors} products={products} flashOffers={flashOffers} addFlashOffer={addFlashOffer} removeFlashOffer={removeFlashOffer} />
 
       {pending.length > 0 && (
         <div className="mb-8">
