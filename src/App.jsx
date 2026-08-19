@@ -9,7 +9,7 @@ import { fetchReviews, submitReview, vendorAverageRating } from "./lib/reviews";
 import { fetchCommunityPosts, createCommunityPost, hideCommunityPost, fetchRecipes, createRecipe, hideRecipe, uploadUserMedia } from "./lib/community";
 import { createProductAlert, registerReferral, completeReferralIfAny, logCheckoutAttempt, markCheckoutConverted, claimPendingBonusPoints, subscribeNewsletter, awardBonusPoints } from "./lib/alerts";
 import { isPushSupported, subscribeToPush, unsubscribeFromPush, sendPushNotification } from "./lib/push";
-import { sendEmail, sendAdminNotification, buildOrderConfirmationEmail, buildVendorNewOrderEmail, buildAdminNewVendorEmail, buildPendingPaymentEmail } from "./lib/emails";
+import { sendEmail, sendAdminNotification, buildOrderConfirmationEmail, buildVendorNewOrderEmail, buildAdminNewVendorEmail, buildPendingPaymentEmail, buildAdminOrderEmail } from "./lib/emails";
 import { marked } from "marked";
 import { LEGAL_DOCS } from "./lib/legalContent";
 import {
@@ -1021,9 +1021,11 @@ export default function App() {
       }
     }
 
-    // Notificaciones por email: al comprador (confirmación) y a cada
-    // vendedor implicado (solo con sus propias líneas del pedido).
+    // Notificaciones por email: al comprador (confirmación), al admin
+    // (albarán completo, siempre, aunque el vendedor no tenga email) y a
+    // cada vendedor implicado (solo con sus propias líneas del pedido).
     sendEmail({ to: shippingAddress.email, ...buildOrderConfirmationEmail(order) });
+    sendAdminNotification(buildAdminOrderEmail(order));
     const vendorIdsInOrder = [...new Set(order.lines.map((l) => l.vendorId))];
     for (const vId of vendorIdsInOrder) {
       const v = vendors.find((x) => x.id === vId);
@@ -1092,6 +1094,7 @@ export default function App() {
         bizumPhone: siteSettings?.bizumPhone || "",
       }),
     });
+    sendAdminNotification(buildAdminOrderEmail(order));
 
     goTo("pago-pendiente", {});
     return order;
@@ -1126,6 +1129,7 @@ export default function App() {
     }
 
     sendEmail({ to: confirmedOrder.shippingAddress?.email, ...buildOrderConfirmationEmail(confirmedOrder) });
+    sendAdminNotification(buildAdminOrderEmail(confirmedOrder));
     const vendorIdsInOrder = [...new Set(confirmedOrder.lines.map((l) => l.vendorId))];
     for (const vId of vendorIdsInOrder) {
       const v = vendors.find((x) => x.id === vId);
@@ -1204,6 +1208,7 @@ export default function App() {
     }
 
     sendEmail({ to: shippingAddress.email, ...buildOrderConfirmationEmail(order) });
+    sendAdminNotification(buildAdminOrderEmail(order));
     if (vendor?.email) sendEmail({ to: vendor.email, ...buildVendorNewOrderEmail(order, order.lines, vendor.name) });
 
     goTo("confirm", {});
@@ -5326,6 +5331,11 @@ function AdminView({ vendors, products, orders, auctions, createAuction, cancelA
                   <div className="flex-1">
                     <p className="flex items-center gap-1.5 text-sm font-semibold">{v.name} {v.verified && <ShieldCheck size={13} color="#2F6B5E" />}</p>
                     <p className="text-xs" style={{ color: "#5C6B6E" }}>{v.location} · {products.filter((p) => p.vendorId === v.id).length} productos</p>
+                    {!v.email && (
+                      <p className="mt-0.5 flex items-center gap-1 text-[11px] font-semibold" style={{ color: "#B04A2F" }}>
+                        ⚠️ Sin email — no le llegan avisos de pedidos nuevos
+                      </p>
+                    )}
                   </div>
                   <div className="flex items-center gap-1.5">
                     <span className="text-[11px]" style={{ color: "#5C6B6E" }}>Comisión</span>

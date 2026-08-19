@@ -96,6 +96,7 @@ export function buildPendingPaymentEmail(order, method, payDetails) {
 /** Email para el vendedor cuando le entra un pedido nuevo (solo sus líneas). */
 export function buildVendorNewOrderEmail(order, vendorLines, vendorName) {
   const totalNet = vendorLines.reduce((s, l) => s + (l.vendorPayout ?? l.price * l.qty), 0);
+  const addr = order.shippingAddress || {};
   return {
     subject: `Nuevo pedido en LonjaYa para ${vendorName}`,
     html: `
@@ -104,7 +105,38 @@ export function buildVendorNewOrderEmail(order, vendorLines, vendorName) {
         <p>Pedido <strong>#${order.id.slice(-6)}</strong>, del ${new Date(order.date).toLocaleDateString("es-ES")}.</p>
         <table style="width:100%;border-collapse:collapse;margin:16px 0">${vendorLines.map(lineRow).join("")}</table>
         <p style="font-size:16px"><strong>Tu ingreso neto (tras comisión LonjaYa): ${totalNet.toFixed(2)} €</strong></p>
-        <p>Entra en tu panel de vendedor en lonjaya.com para ver el pedido completo y la dirección de entrega.</p>
+        <div style="background:#F6F8F7;border-radius:8px;padding:14px;margin:16px 0">
+          <p style="margin:2px 0"><strong>Entregar a:</strong> ${addr.name || ""}</p>
+          <p style="margin:2px 0">${addr.address || ""}, ${addr.city || ""} (${addr.postal || ""})</p>
+          <p style="margin:2px 0">Tel: ${addr.phone || "—"}</p>
+        </div>
+        <p>Entra en tu panel de vendedor en lonjaya.com para ver el pedido completo.</p>
+        ${BRAND_FOOTER}
+      </div>`,
+  };
+}
+
+/** Albarán completo para el admin — se manda con cada pedido nuevo, para
+ * que no dependa de mirar el panel para enterarse. */
+export function buildAdminOrderEmail(order) {
+  const addr = order.shippingAddress || {};
+  return {
+    subject: `📦 Nuevo pedido #${order.id.slice(-6)} — ${order.total.toFixed(2)} €`,
+    html: `
+      <div style="font-family:sans-serif;max-width:480px;margin:auto">
+        <h2 style="color:#0E3A45">Nuevo pedido en LonjaYa</h2>
+        <p>Pedido <strong>#${order.id.slice(-6)}</strong> · ${new Date(order.date).toLocaleString("es-ES")} · Pago: ${order.payment?.provider || "—"} · Estado: ${order.status || "confirmado"}</p>
+        <table style="width:100%;border-collapse:collapse;margin:16px 0">
+          ${order.lines.map(lineRow).join("")}
+          ${moneyRow("Envío", order.shippingCost)}
+        </table>
+        <p style="font-size:18px"><strong>Total: ${order.total.toFixed(2)} €</strong></p>
+        <div style="background:#F6F8F7;border-radius:8px;padding:14px;margin:16px 0">
+          <p style="margin:2px 0"><strong>Comprador:</strong> ${addr.name || ""}</p>
+          <p style="margin:2px 0"><strong>Email:</strong> ${addr.email || ""}</p>
+          <p style="margin:2px 0"><strong>Teléfono:</strong> ${addr.phone || "—"}</p>
+          <p style="margin:2px 0"><strong>Dirección:</strong> ${addr.address || ""}, ${addr.city || ""} (${addr.postal || ""})</p>
+        </div>
         ${BRAND_FOOTER}
       </div>`,
   };
