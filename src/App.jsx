@@ -9,7 +9,7 @@ import { fetchReviews, submitReview, vendorAverageRating } from "./lib/reviews";
 import { fetchCommunityPosts, createCommunityPost, hideCommunityPost, fetchRecipes, createRecipe, hideRecipe, uploadUserMedia } from "./lib/community";
 import { createProductAlert, registerReferral, completeReferralIfAny, logCheckoutAttempt, markCheckoutConverted, claimPendingBonusPoints, subscribeNewsletter, awardBonusPoints } from "./lib/alerts";
 import { isPushSupported, subscribeToPush, unsubscribeFromPush, sendPushNotification } from "./lib/push";
-import { sendEmail, sendAdminNotification, buildOrderConfirmationEmail, buildVendorNewOrderEmail, buildAdminNewVendorEmail, buildPendingPaymentEmail, buildAdminOrderEmail } from "./lib/emails";
+import { sendEmail, sendAdminNotification, buildOrderConfirmationEmail, buildVendorNewOrderEmail, buildAdminNewVendorEmail, buildPendingPaymentEmail, buildAdminOrderEmail, buildBuyerClaimsPaidEmail } from "./lib/emails";
 import { marked } from "marked";
 import { LEGAL_DOCS } from "./lib/legalContent";
 import {
@@ -260,9 +260,12 @@ function useAuctionTick() {
 }
 
 /* Ticker flotante de compras recientes (prueba social simulada) */
-function NewsletterForm() {
+function NewsletterForm({ siteSettings }) {
   const [email, setEmail] = useState("");
   const [state, setState] = useState("idle"); // idle | sending | done
+  const code = siteSettings?.discountCode || "BIENVENIDA10";
+  const pct = siteSettings?.discountPercent ?? 10;
+  const active = siteSettings?.discountActive !== false;
 
   const submit = async () => {
     if (!email.includes("@")) return;
@@ -276,24 +279,33 @@ function NewsletterForm() {
   };
 
   if (state === "done") {
-    return <p className="text-xs font-medium" style={{ color: "#2F6B5E" }}>✓ ¡Gracias! Ya estás suscrito al boletín.</p>;
+    return (
+      <p className="text-xs font-medium" style={{ color: "#2F6B5E" }}>
+        ✓ ¡Gracias! {active && <>Usa el código <strong style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{code}</strong> para tu {pct}% de descuento en el primer pedido.</>}
+      </p>
+    );
   }
 
   return (
-    <div className="flex w-full max-w-xs gap-2">
-      <input
-        type="email" placeholder="Tu email" value={email} onChange={(e) => setEmail(e.target.value)}
-        onKeyDown={(e) => e.key === "Enter" && submit()}
-        className="flex-1 rounded-md border px-3 py-1.5 text-xs" style={{ borderColor: "#3A4649", backgroundColor: "#1E2E33", color: "#F6F8F7" }}
-      />
-      <button
-        disabled={state === "sending"}
-        onClick={submit}
-        className="shrink-0 rounded-md px-3 py-1.5 text-xs font-semibold text-white disabled:opacity-50"
-        style={{ backgroundColor: "#E85D42" }}
-      >
-        {state === "sending" ? "…" : "Suscribirme"}
-      </button>
+    <div className="flex flex-col gap-1.5">
+      {active && (
+        <p className="text-xs font-semibold" style={{ color: "#E4D9C4" }}>🎁 Suscríbete y llévate un {pct}% en tu primer pedido</p>
+      )}
+      <div className="flex w-full max-w-xs gap-2">
+        <input
+          type="email" placeholder="Tu email" value={email} onChange={(e) => setEmail(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && submit()}
+          className="flex-1 rounded-md border px-3 py-1.5 text-xs" style={{ borderColor: "#3A4649", backgroundColor: "#1E2E33", color: "#F6F8F7" }}
+        />
+        <button
+          disabled={state === "sending"}
+          onClick={submit}
+          className="shrink-0 rounded-md px-3 py-1.5 text-xs font-semibold text-white disabled:opacity-50"
+          style={{ backgroundColor: "#E85D42" }}
+        >
+          {state === "sending" ? "…" : "Suscribirme"}
+        </button>
+      </div>
     </div>
   );
 }
@@ -424,6 +436,24 @@ function StampBadge({ children }) {
 /*  PANTALLA DE APERTURA                                                */
 /* ------------------------------------------------------------------ */
 
+function WhatsAppFloatingButton({ phone }) {
+  if (!phone) return null;
+  const message = encodeURIComponent("Hola, tengo una duda sobre un pedido en LonjaYa antes de comprar:");
+  return (
+    <a
+      href={`https://wa.me/${phone}?text=${message}`}
+      target="_blank"
+      rel="noopener noreferrer"
+      className="fixed bottom-5 right-5 z-50 flex items-center gap-2 rounded-full px-4 py-3 text-sm font-semibold text-white shadow-xl transition-transform hover:scale-105"
+      style={{ backgroundColor: "#25D366" }}
+      aria-label="Escríbenos por WhatsApp"
+    >
+      <svg viewBox="0 0 24 24" width="20" height="20" fill="white"><path d="M12.04 2C6.58 2 2.13 6.45 2.13 11.91c0 1.75.46 3.45 1.32 4.95L2 22l5.29-1.39c1.44.79 3.07 1.2 4.75 1.2h.01c5.46 0 9.91-4.45 9.91-9.91C21.96 6.45 17.5 2 12.04 2zm0 18.14h-.01c-1.48 0-2.93-.4-4.2-1.15l-.3-.18-3.14.82.84-3.06-.2-.31a8.2 8.2 0 0 1-1.26-4.35c0-4.53 3.69-8.22 8.24-8.22 2.2 0 4.27.86 5.82 2.42a8.17 8.17 0 0 1 2.41 5.81c0 4.53-3.69 8.22-8.2 8.22zm4.51-6.16c-.25-.12-1.47-.72-1.7-.81-.23-.08-.39-.12-.56.13-.17.25-.64.81-.78.97-.14.17-.29.19-.53.06-.25-.12-1.05-.39-2-1.23-.74-.66-1.24-1.48-1.39-1.73-.14-.25-.02-.38.11-.5.11-.11.25-.29.37-.43.12-.14.16-.25.25-.41.08-.17.04-.31-.02-.43-.06-.12-.56-1.35-.77-1.85-.2-.48-.41-.42-.56-.43h-.48c-.17 0-.43.06-.66.31-.23.25-.86.85-.86 2.06 0 1.22.89 2.4 1.01 2.56.12.17 1.75 2.67 4.24 3.74.59.26 1.05.41 1.41.52.59.19 1.13.16 1.56.1.48-.07 1.47-.6 1.67-1.18.21-.58.21-1.07.14-1.18-.06-.1-.23-.16-.48-.28z"/></svg>
+      WhatsApp
+    </a>
+  );
+}
+
 function SplashScreen({ onEnter, siteSettings, products, vendors, goTo }) {
   const [closing, setClosing] = useState(false);
   const [tagIndex, setTagIndex] = useState(0);
@@ -436,7 +466,16 @@ function SplashScreen({ onEnter, siteSettings, products, vendors, goTo }) {
   // Bolsa de productos elegibles para las etiquetas (frescos hoy, con stock),
   // ordenados por precio — se van rotando de 2 en 2 cada 2 minutos.
   const eligibleProducts = useMemo(() => {
-    return products.filter((p) => p.freshness === "hoy" && p.stock > 0).sort((a, b) => b.price - a.price);
+    // Prioriza lo que la analítica real demuestra que más engancha
+    // (bogavante y gamba), y detrás el resto por precio.
+    const STAR_KEYWORDS = ["bogavante", "gamba"];
+    const isStar = (p) => STAR_KEYWORDS.some((k) => p.name.toLowerCase().includes(k));
+    return products
+      .filter((p) => p.freshness === "hoy" && p.stock > 0)
+      .sort((a, b) => {
+        const starDiff = Number(isStar(b)) - Number(isStar(a));
+        return starDiff !== 0 ? starDiff : b.price - a.price;
+      });
   }, [products]);
 
   useEffect(() => {
@@ -968,6 +1007,16 @@ export default function App() {
   };
 
   /* -------- checkout -------- */
+  /** Nombres (sin repetir) de los vendedores de este pedido que no tienen
+   * email guardado — para avisar de forma destacada al admin. */
+  const vendorsMissingEmail = (order) => {
+    const vendorIds = [...new Set(order.lines.map((l) => l.vendorId))];
+    return vendorIds
+      .map((vId) => vendors.find((v) => v.id === vId))
+      .filter((v) => v && !v.email)
+      .map((v) => v.name);
+  };
+
   const placeOrder = async (shippingAddress, payment) => {
     const shippingCost = shippingCostForWeight(cartWeightKg(cartLines));
     const earnedPoints = Math.round(cartTotal * LOYALTY_CONFIG.pointsPerEuro);
@@ -1025,7 +1074,7 @@ export default function App() {
     // (albarán completo, siempre, aunque el vendedor no tenga email) y a
     // cada vendedor implicado (solo con sus propias líneas del pedido).
     sendEmail({ to: shippingAddress.email, ...buildOrderConfirmationEmail(order) });
-    sendAdminNotification(buildAdminOrderEmail(order));
+    sendAdminNotification(buildAdminOrderEmail(order, vendorsMissingEmail(order)));
     const vendorIdsInOrder = [...new Set(order.lines.map((l) => l.vendorId))];
     for (const vId of vendorIdsInOrder) {
       const v = vendors.find((x) => x.id === vId);
@@ -1052,7 +1101,7 @@ export default function App() {
   };
 
   /* -------- pago por transferencia bancaria o Bizum (confirmación manual) -------- */
-  const placeOrderPendingPayment = async (shippingAddress, method) => {
+  const placeOrderPendingPayment = async (shippingAddress, method, discountAmount = 0) => {
     const shippingCost = shippingCostForWeight(cartWeightKg(cartLines));
     const earnedPoints = Math.round(cartTotal * LOYALTY_CONFIG.pointsPerEuro);
     const order = {
@@ -1069,7 +1118,8 @@ export default function App() {
       }),
       subtotal: cartTotal,
       shippingCost,
-      total: cartTotal + shippingCost,
+      discountAmount,
+      total: Math.max(0, cartTotal + shippingCost - discountAmount),
       shippingAddress,
       payment: { provider: method }, // "transferencia" | "bizum"
       status: "pendiente_pago",
@@ -1094,7 +1144,7 @@ export default function App() {
         bizumPhone: siteSettings?.bizumPhone || "",
       }),
     });
-    sendAdminNotification(buildAdminOrderEmail(order));
+    sendAdminNotification(buildAdminOrderEmail(order, vendorsMissingEmail(order)));
 
     goTo("pago-pendiente", {});
     return order;
@@ -1129,7 +1179,7 @@ export default function App() {
     }
 
     sendEmail({ to: confirmedOrder.shippingAddress?.email, ...buildOrderConfirmationEmail(confirmedOrder) });
-    sendAdminNotification(buildAdminOrderEmail(confirmedOrder));
+    sendAdminNotification(buildAdminOrderEmail(confirmedOrder, vendorsMissingEmail(confirmedOrder)));
     const vendorIdsInOrder = [...new Set(confirmedOrder.lines.map((l) => l.vendorId))];
     for (const vId of vendorIdsInOrder) {
       const v = vendors.find((x) => x.id === vId);
@@ -1138,6 +1188,26 @@ export default function App() {
       sendEmail({ to: v.email, ...buildVendorNewOrderEmail(confirmedOrder, vendorLines, v.name) });
     }
     showToast("Pedido confirmado y comprador avisado");
+  };
+
+  /* El comprador pulsa "Ya he pagado": no cambia el estado del pedido (sigue
+   * pendiente hasta que el admin lo compruebe de verdad), pero dispara un
+   * aviso inmediato para que el admin no dependa solo de mirar el banco por
+   * su cuenta — acelera mucho el tiempo real de confirmación. */
+  const markOrderClaimedPaid = async (orderId) => {
+    const order = orders.find((o) => o.id === orderId);
+    if (!order) return false;
+    const updated = { ...order, claimedPaidAt: new Date().toISOString() };
+    const next = orders.map((o) => (o.id === orderId ? updated : o));
+    const saved = await saveShared("lonja:orders", next);
+    if (!saved) {
+      showToast("No se pudo enviar el aviso, inténtalo de nuevo.");
+      return false;
+    }
+    setOrders(next);
+    sendAdminNotification(buildBuyerClaimsPaidEmail(updated));
+    showToast("Avisado — en cuanto lo confirmen, verás tu pedido pasar a confirmado.");
+    return true;
   };
 
   /* -------- compra de subastas: reserva a precio bloqueado + pago -------- */
@@ -1208,7 +1278,7 @@ export default function App() {
     }
 
     sendEmail({ to: shippingAddress.email, ...buildOrderConfirmationEmail(order) });
-    sendAdminNotification(buildAdminOrderEmail(order));
+    sendAdminNotification(buildAdminOrderEmail(order, vendorsMissingEmail(order)));
     if (vendor?.email) sendEmail({ to: vendor.email, ...buildVendorNewOrderEmail(order, order.lines, vendor.name) });
 
     goTo("confirm", {});
@@ -1372,6 +1442,7 @@ export default function App() {
   return (
     <div className="min-h-screen w-full" style={{ backgroundColor: "#F6F8F7", color: "#16242A", fontFamily: "'Inter', sans-serif" }}>
       <FontImports />
+      <WhatsAppFloatingButton phone={siteSettings?.whatsappSupportPhone} />
 
       {/* ---------------- TICKER ---------------- */}
       <div className="overflow-hidden whitespace-nowrap py-1.5" style={{ backgroundColor: "#16242A" }}>
@@ -1604,8 +1675,8 @@ export default function App() {
           />
         )}
         {view === "confirm" && <ConfirmView goTo={goTo} order={lastOrder} totalPoints={points} />}
-        {view === "pago-pendiente" && <PendingPaymentView goTo={goTo} order={lastOrder} siteSettings={siteSettings} />}
-        {view === "mis-pedidos" && <MyOrdersView orders={orders} user={user} reviews={reviews} addReview={addReview} goTo={goTo} showToast={showToast} />}
+        {view === "pago-pendiente" && <PendingPaymentView goTo={goTo} order={lastOrder} siteSettings={siteSettings} markOrderClaimedPaid={markOrderClaimedPaid} />}
+        {view === "mis-pedidos" && <MyOrdersView orders={orders} user={user} reviews={reviews} addReview={addReview} goTo={goTo} showToast={showToast} setLastOrder={setLastOrder} />}
         {view === "blog" && (
           <BlogView
             posts={communityPosts} vendors={vendors} products={products} user={user} goTo={goTo}
@@ -1666,7 +1737,7 @@ export default function App() {
             {" "}Logística en frío a cargo de {LOGISTICS_INFO.partnerName}.
             {" "}Producto seleccionado directamente de {new Set(vendors.map((v) => v.location)).size || 0} lonjas y puertos de toda España.
           </p>
-          <NewsletterForm />
+          <NewsletterForm siteSettings={siteSettings} />
           <div className="flex flex-wrap items-center justify-center gap-x-3 gap-y-1 text-[11px]" style={{ color: "#5C6B6E" }}>
             {[
               { id: "aviso", label: "Aviso legal" },
@@ -1862,6 +1933,9 @@ function HomeView({ products, vendors, goTo, addToCart, siteSettings, setFilters
           >
             Ver la lonja de hoy <ChevronRight size={16} />
           </button>
+          <p className="mt-3 flex items-center gap-1.5 text-xs font-medium" style={{ color: "#C9D6D2", textShadow: heroVideoUrl ? "0 1px 4px rgba(0,0,0,0.8)" : "none" }}>
+            <Snowflake size={13} /> Envío en frío 24h a toda España — también a Sevilla, Madrid y el resto de la península
+          </p>
         </div>
         {!heroVideoUrl && (
           <div className="pointer-events-none absolute -right-6 -top-6 select-none text-[180px] opacity-10 sm:text-[240px]">🐟</div>
@@ -2915,11 +2989,29 @@ function CheckoutView({ lines, total, user, placeOrder, placeOrderPendingPayment
   });
   const [submitting, setSubmitting] = useState(false);
   const [payError, setPayError] = useState("");
+  const [discountInput, setDiscountInput] = useState("");
+  const [discountApplied, setDiscountApplied] = useState(false);
+  const [localNotice, setLocalNotice] = useState("");
   const weightKg = cartWeightKg(lines);
   const freeShippingThreshold = siteSettings?.freeShippingThreshold ?? 100;
   const freeShipping = total >= freeShippingThreshold;
   const shipping = freeShipping ? 0 : shippingCostForWeight(weightKg);
-  const grandTotal = total + shipping;
+  const validCode = siteSettings?.discountCode || "BIENVENIDA10";
+  const discountPct = siteSettings?.discountPercent ?? 10;
+  const discountActive = siteSettings?.discountActive !== false;
+  const discountAmount = discountApplied ? Math.round(total * (discountPct / 100) * 100) / 100 : 0;
+  const grandTotal = total + shipping - discountAmount;
+
+  const applyDiscount = () => {
+    if (discountActive && discountInput.trim().toUpperCase() === validCode.toUpperCase()) {
+      setDiscountApplied(true);
+      setLocalNotice("");
+    } else {
+      setDiscountApplied(false);
+      setLocalNotice("Código no válido");
+      setTimeout(() => setLocalNotice(""), 2500);
+    }
+  };
 
   const minDeliveryDate = useMemo(() => {
     const d = new Date();
@@ -3029,7 +3121,7 @@ function CheckoutView({ lines, total, user, placeOrder, placeOrderPendingPayment
                       setSubmitting(true);
                       setPayError("");
                       try {
-                        await placeOrderPendingPayment(form, form.payment);
+                        await placeOrderPendingPayment(form, form.payment, discountAmount);
                       } catch (err) {
                         setPayError("No se pudo reservar el pedido. Inténtalo de nuevo.");
                       } finally {
@@ -3041,6 +3133,10 @@ function CheckoutView({ lines, total, user, placeOrder, placeOrderPendingPayment
                   >
                     {submitting ? "Reservando…" : `Confirmar pedido — pagar por ${form.payment === "bizum" ? "Bizum" : "transferencia"}`}
                   </button>
+                  <p className="mt-2 flex items-center gap-1.5 text-[11px]" style={{ color: "#5C6B6E" }}>
+                    <ShieldCheck size={13} color="#2F6B5E" /> Compra protegida: si el pedido no llega en condiciones, gestionamos la devolución.{" "}
+                    <button type="button" onClick={() => goTo("legal-devoluciones")} className="underline">Ver política</button>
+                  </p>
                 </div>
               )}
             </>
@@ -3082,6 +3178,31 @@ function CheckoutView({ lines, total, user, placeOrder, placeOrderPendingPayment
             Añade {eur(freeShippingThreshold - total)} más y el envío te sale gratis.
           </p>
         )}
+
+        {discountActive && (
+          <div className="mt-2 border-t pt-2" style={{ borderColor: "#E4D9C4" }}>
+            {discountApplied ? (
+              <p className="flex items-center justify-between text-xs font-semibold" style={{ color: "#2F6B5E" }}>
+                <span>Código {validCode} aplicado (-{discountPct}%)</span>
+                <span>-{eur(discountAmount)}</span>
+              </p>
+            ) : (
+              <div className="flex gap-2">
+                <input
+                  placeholder="Código de descuento" value={discountInput}
+                  onChange={(e) => setDiscountInput(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && applyDiscount()}
+                  className="flex-1 rounded border px-2 py-1.5 text-xs" style={{ borderColor: "#D9CBB3" }}
+                />
+                <button onClick={applyDiscount} className="rounded-md border px-3 py-1.5 text-xs font-semibold" style={{ borderColor: "#0E3A45", color: "#0E3A45" }}>
+                  Aplicar
+                </button>
+              </div>
+            )}
+            {localNotice && <p className="mt-1 text-[11px] font-medium" style={{ color: "#B04A2F" }}>{localNotice}</p>}
+          </div>
+        )}
+
         <div className="mt-1 flex justify-between text-base font-bold">
           <span>Total</span><span style={{ color: "#E85D42" }}>{eur(grandTotal)}</span>
         </div>
@@ -3587,8 +3708,13 @@ function PushNotificationsBox({ user, showToast }) {
   );
 }
 
-function MyOrdersView({ orders, user, reviews, addReview, goTo, showToast }) {
+function MyOrdersView({ orders, user, reviews, addReview, goTo, showToast, setLastOrder }) {
   const myOrders = orders.filter((o) => o.shippingAddress?.email === user?.email);
+
+  const viewPaymentInstructions = (o) => {
+    setLastOrder(o);
+    goTo("pago-pendiente");
+  };
 
   return (
     <div className="mx-auto max-w-2xl py-6">
@@ -3606,30 +3732,72 @@ function MyOrdersView({ orders, user, reviews, addReview, goTo, showToast }) {
         </p>
       ) : (
         <div className="flex flex-col gap-3">
-          {myOrders.map((o) => (
-            <div key={o.id} className="rounded-lg border bg-white p-4" style={{ borderColor: "#E4D9C4" }}>
-              <div className="flex items-center justify-between text-xs" style={{ color: "#5C6B6E" }}>
-                <span>Pedido #{o.id.slice(-6)}</span>
-                <span>{new Date(o.date).toLocaleDateString("es-ES")}</span>
-              </div>
-              <div className="mt-2 flex flex-col gap-3">
-                {o.lines.map((l, i) => (
-                  <div key={i} className="border-t pt-2" style={{ borderColor: "#EFEAE0" }}>
-                    <p className="text-sm font-semibold">{l.qty} {l.unit || ""} × {l.name}</p>
-                    <ReviewForm line={l} order={o} reviews={reviews} user={user} addReview={addReview} />
+          {myOrders.map((o) => {
+            const isPending = o.status === "pendiente_pago";
+            return (
+              <div key={o.id} className="rounded-lg border bg-white p-4" style={{ borderColor: isPending ? "#B08900" : "#E4D9C4" }}>
+                <div className="flex items-center justify-between text-xs" style={{ color: "#5C6B6E" }}>
+                  <span>Pedido #{o.id.slice(-6)}</span>
+                  <span>{new Date(o.date).toLocaleDateString("es-ES")}</span>
+                </div>
+                {isPending && (
+                  <div className="mt-2 flex flex-wrap items-center justify-between gap-2 rounded-md p-2" style={{ backgroundColor: "#B0890010" }}>
+                    <span className="text-xs font-semibold" style={{ color: "#8A6A00" }}>
+                      {o.claimedPaidAt ? "⏳ Aviso enviado, pendiente de confirmar" : "⏳ Pendiente de pago"}
+                    </span>
+                    <button onClick={() => viewPaymentInstructions(o)} className="text-xs font-semibold underline" style={{ color: "#0E3A45" }}>
+                      Ver instrucciones de pago
+                    </button>
                   </div>
-                ))}
+                )}
+                <div className="mt-2 flex flex-col gap-3">
+                  {o.lines.map((l, i) => (
+                    <div key={i} className="border-t pt-2" style={{ borderColor: "#EFEAE0" }}>
+                      <p className="text-sm font-semibold">{l.qty} {l.unit || ""} × {l.name}</p>
+                      {!isPending && <ReviewForm line={l} order={o} reviews={reviews} user={user} addReview={addReview} />}
+                    </div>
+                  ))}
+                </div>
+                <p className="mt-2 border-t pt-2 text-right text-sm font-bold" style={{ borderColor: "#EFEAE0", color: "#E85D42" }}>{eur(o.total)}</p>
               </div>
-              <p className="mt-2 border-t pt-2 text-right text-sm font-bold" style={{ borderColor: "#EFEAE0", color: "#E85D42" }}>{eur(o.total)}</p>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
     </div>
   );
 }
 
-function PendingPaymentView({ goTo, order, siteSettings }) {
+function CopyField({ label, value, big }) {
+  const [copied, setCopied] = useState(false);
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(value);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1800);
+    } catch {}
+  };
+  return (
+    <div className="mb-2 flex items-center justify-between gap-3">
+      <div className="min-w-0">
+        <p className="text-xs font-semibold" style={{ color: "#5C6B6E" }}>{label}</p>
+        <p className={big ? "text-lg font-bold" : "text-sm font-bold"} style={{ fontFamily: "'IBM Plex Mono', monospace", color: big ? "#E85D42" : "#16242A", wordBreak: "break-all" }}>{value}</p>
+      </div>
+      <button
+        onClick={copy}
+        className="shrink-0 rounded-md border px-2.5 py-1.5 text-[11px] font-semibold"
+        style={{ borderColor: copied ? "#2F6B5E" : "#D9CBB3", color: copied ? "#2F6B5E" : "#5C6B6E" }}
+      >
+        {copied ? "✓ Copiado" : "Copiar"}
+      </button>
+    </div>
+  );
+}
+
+function PendingPaymentView({ goTo, order, siteSettings, markOrderClaimedPaid }) {
+  const [claiming, setClaiming] = useState(false);
+  const [claimed, setClaimed] = useState(!!order?.claimedPaidAt);
+
   if (!order) {
     return (
       <div className="mx-auto max-w-sm py-20 text-center">
@@ -3638,6 +3806,21 @@ function PendingPaymentView({ goTo, order, siteSettings }) {
     );
   }
   const isBizum = order.payment?.provider === "bizum";
+  const isConfirmed = order.status === "confirmado";
+
+  const steps = [
+    { n: 1, label: "Pedido reservado", done: true },
+    { n: 2, label: "Realizas el pago", done: claimed || isConfirmed },
+    { n: 3, label: "Confirmamos y preparamos", done: isConfirmed },
+  ];
+
+  const claim = async () => {
+    setClaiming(true);
+    const ok = await markOrderClaimedPaid(order.id);
+    setClaiming(false);
+    if (ok) setClaimed(true);
+  };
+
   return (
     <div className="mx-auto max-w-md py-10 text-center">
       <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-full" style={{ backgroundColor: "#B0890022" }}>
@@ -3648,36 +3831,64 @@ function PendingPaymentView({ goTo, order, siteSettings }) {
         Pedido <strong>#{order.id.slice(-6)}</strong>. Completa el pago con estos datos y confirmaremos tu pedido en cuanto lo recibamos.
       </p>
 
+      {/* Indicador de pasos */}
+      <div className="mt-5 flex items-center justify-center gap-1">
+        {steps.map((s, i) => (
+          <div key={s.n} className="flex items-center">
+            <div className="flex flex-col items-center gap-1">
+              <div
+                className="flex h-7 w-7 items-center justify-center rounded-full text-xs font-bold"
+                style={{ backgroundColor: s.done ? "#2F6B5E" : "#EFEAE0", color: s.done ? "white" : "#5C6B6E" }}
+              >
+                {s.done ? "✓" : s.n}
+              </div>
+              <span className="w-16 text-[10px] leading-tight" style={{ color: s.done ? "#2F6B5E" : "#5C6B6E" }}>{s.label}</span>
+            </div>
+            {i < steps.length - 1 && <div className="mb-4 h-0.5 w-8" style={{ backgroundColor: steps[i + 1].done ? "#2F6B5E" : "#EFEAE0" }} />}
+          </div>
+        ))}
+      </div>
+
       <div className="mt-5 rounded-lg border bg-white p-5 text-left" style={{ borderColor: "#E4D9C4" }}>
         {isBizum ? (
-          <div className="mb-2">
-            <p className="text-xs font-semibold" style={{ color: "#5C6B6E" }}>Teléfono Bizum</p>
-            <p className="text-lg font-bold" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{siteSettings?.bizumPhone || "—"}</p>
-          </div>
+          <CopyField label="Teléfono Bizum" value={siteSettings?.bizumPhone || "—"} big />
         ) : (
           <>
-            <div className="mb-2">
-              <p className="text-xs font-semibold" style={{ color: "#5C6B6E" }}>IBAN</p>
-              <p className="text-base font-bold" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{siteSettings?.bankTransferIban || "—"}</p>
-            </div>
+            <CopyField label="IBAN" value={siteSettings?.bankTransferIban || "—"} />
             <div className="mb-2">
               <p className="text-xs font-semibold" style={{ color: "#5C6B6E" }}>Titular</p>
               <p className="text-sm">{siteSettings?.bankTransferHolder || "—"}</p>
             </div>
           </>
         )}
-        <div className="mb-2">
-          <p className="text-xs font-semibold" style={{ color: "#5C6B6E" }}>Importe exacto</p>
-          <p className="text-lg font-bold" style={{ color: "#E85D42" }}>{eur(order.total)}</p>
-        </div>
-        <div>
-          <p className="text-xs font-semibold" style={{ color: "#5C6B6E" }}>Concepto (inclúyelo, es importante)</p>
-          <p className="text-sm font-bold" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>LONJAYA-{order.id.slice(-6)}</p>
-        </div>
+        <CopyField label="Importe exacto" value={eur(order.total)} big />
+        <CopyField label="Concepto (inclúyelo, es importante)" value={`LONJAYA-${order.id.slice(-6)}`} />
       </div>
 
+      {isConfirmed ? (
+        <p className="mt-5 rounded-md border p-3 text-sm font-semibold" style={{ borderColor: "#2F6B5E", color: "#2F6B5E", backgroundColor: "#2F6B5E10" }}>
+          ✓ Pago confirmado — tu pedido ya se está preparando.
+        </p>
+      ) : claimed ? (
+        <p className="mt-5 rounded-md border p-3 text-sm font-medium" style={{ borderColor: "#B08900", color: "#8A6A00", backgroundColor: "#B0890010" }}>
+          Hemos avisado de que ya has pagado — en cuanto lo comprueben, tu pedido pasará a "confirmado".
+        </p>
+      ) : (
+        <button
+          disabled={claiming}
+          onClick={claim}
+          className="mt-5 w-full rounded-md py-3 text-sm font-bold text-white disabled:opacity-50"
+          style={{ backgroundColor: "#2F6B5E" }}
+        >
+          {claiming ? "Avisando…" : "✓ Ya he hecho el pago"}
+        </button>
+      )}
+
       <p className="mt-4 text-xs" style={{ color: "#5C6B6E" }}>Te hemos enviado estos mismos datos por email, por si los necesitas más tarde.</p>
-      <button onClick={() => goTo("home")} className="mt-5 rounded-md px-4 py-2 text-sm font-semibold text-white" style={{ backgroundColor: "#0E3A45" }}>Volver al inicio</button>
+      <div className="mt-2 flex justify-center gap-4">
+        <button onClick={() => goTo("home")} className="text-xs font-medium underline" style={{ color: "#5C6B6E" }}>Volver al inicio</button>
+        <button onClick={() => goTo("mis-pedidos")} className="text-xs font-medium underline" style={{ color: "#5C6B6E" }}>Ver mis pedidos</button>
+      </div>
     </div>
   );
 }
@@ -4346,7 +4557,10 @@ function ProductEditorModal({ product, categories, onClose, onSave }) {
 
 function PendingPaymentsAdminSection({ orders, vendors, confirmPendingOrderPayment }) {
   const [confirmingId, setConfirmingId] = useState(null);
-  const pending = orders.filter((o) => o.status === "pendiente_pago");
+  const pending = [...orders.filter((o) => o.status === "pendiente_pago")].sort((a, b) => {
+    if (!!b.claimedPaidAt !== !!a.claimedPaidAt) return a.claimedPaidAt ? -1 : 1;
+    return new Date(a.date) - new Date(b.date);
+  });
 
   if (pending.length === 0) return null;
 
@@ -4362,13 +4576,16 @@ function PendingPaymentsAdminSection({ orders, vendors, confirmPendingOrderPayme
         ⏳ Pedidos pendientes de pago ({pending.length})
       </h2>
       <p className="mb-3 text-[11px]" style={{ color: "#5C6B6E" }}>
-        Pagos por transferencia o Bizum. En cuanto veas el ingreso en tu cuenta, confírmalo aquí — no antes.
+        Pagos por transferencia o Bizum. En cuanto veas el ingreso en tu cuenta, confírmalo aquí — no antes. Los que el comprador ya ha marcado como pagados aparecen primero.
       </p>
       <div className="flex flex-col gap-2">
         {pending.map((o) => (
-          <div key={o.id} className="flex flex-wrap items-center gap-3 rounded-lg border p-3" style={{ borderColor: "#B08900", backgroundColor: "#B0890010" }}>
+          <div key={o.id} className="flex flex-wrap items-center gap-3 rounded-lg border p-3" style={{ borderColor: o.claimedPaidAt ? "#2F6B5E" : "#B08900", backgroundColor: o.claimedPaidAt ? "#2F6B5E10" : "#B0890010" }}>
             <div className="flex-1">
-              <p className="text-xs font-semibold">Pedido #{o.id.slice(-6)} · {o.shippingAddress?.name}</p>
+              <p className="text-xs font-semibold">
+                Pedido #{o.id.slice(-6)} · {o.shippingAddress?.name}
+                {o.claimedPaidAt && <span className="ml-1.5 rounded px-1.5 py-0.5 text-[10px] font-bold text-white" style={{ backgroundColor: "#2F6B5E" }}>DICE QUE YA PAGÓ</span>}
+              </p>
               <p className="text-[11px]" style={{ color: "#5C6B6E" }}>
                 {o.payment?.provider === "bizum" ? "Bizum" : "Transferencia"} · Concepto: LONJAYA-{o.id.slice(-6)} · {new Date(o.date).toLocaleDateString("es-ES")}
               </p>
@@ -4969,6 +5186,77 @@ function SplashMediaControls({ siteSettings, updateSiteSettings }) {
   );
 }
 
+function WhatsAppSupportControls({ siteSettings, updateSiteSettings }) {
+  const [phone, setPhone] = useState(siteSettings?.whatsappSupportPhone || "");
+  const [saved, setSaved] = useState(false);
+
+  const save = async () => {
+    await updateSiteSettings({ whatsappSupportPhone: phone });
+    setSaved(true);
+    setTimeout(() => setSaved(false), 2000);
+  };
+
+  return (
+    <div className="mt-6">
+      <h2 className="mb-1 flex items-center gap-1.5 text-sm font-semibold uppercase tracking-wide" style={{ color: "#5C6B6E" }}>
+        💬 WhatsApp de dudas
+      </h2>
+      <p className="mb-3 text-[11px]" style={{ color: "#5C6B6E" }}>
+        Si lo rellenas, aparece un botón flotante de WhatsApp en toda la web para resolver dudas antes de comprar. Si lo dejas vacío, el botón no se muestra.
+      </p>
+      <div className="flex items-center gap-2 rounded-lg border bg-white p-4" style={{ borderColor: "#E4D9C4" }}>
+        <input
+          placeholder="Ej. 34600123456 (con prefijo de país, sin +)" value={phone} onChange={(e) => setPhone(e.target.value)}
+          className="flex-1 rounded border px-3 py-2 text-sm" style={{ borderColor: "#D9CBB3" }}
+        />
+        <button onClick={save} className="rounded-md px-3 py-1.5 text-xs font-semibold text-white" style={{ backgroundColor: "#0E3A45" }}>
+          {saved ? "✓ Guardado" : "Guardar"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function DiscountCodeControls({ siteSettings, updateSiteSettings }) {
+  const [code, setCode] = useState(siteSettings?.discountCode || "BIENVENIDA10");
+  const [pct, setPct] = useState(siteSettings?.discountPercent ?? 10);
+  const active = siteSettings?.discountActive !== false;
+  const [saved, setSaved] = useState(false);
+
+  const save = async (patch) => {
+    await updateSiteSettings({ discountCode: code, discountPercent: Number(pct), discountActive: active, ...patch });
+    setSaved(true);
+    setTimeout(() => setSaved(false), 2000);
+  };
+
+  return (
+    <div className="mt-6">
+      <h2 className="mb-1 flex items-center gap-1.5 text-sm font-semibold uppercase tracking-wide" style={{ color: "#5C6B6E" }}>
+        🎁 Código de bienvenida (boletín)
+      </h2>
+      <p className="mb-3 text-[11px]" style={{ color: "#5C6B6E" }}>
+        Se ofrece a quien se suscribe al boletín, en la portada. Se aplica en el checkout como descuento sobre el subtotal (no sobre el envío).
+      </p>
+      <div className="rounded-lg border bg-white p-4" style={{ borderColor: "#E4D9C4" }}>
+        <label className="mb-3 flex items-center gap-2 text-xs font-medium">
+          <input type="checkbox" checked={active} onChange={(e) => save({ discountActive: e.target.checked })} />
+          Código activo
+        </label>
+        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+          <input placeholder="Código (ej. BIENVENIDA10)" value={code} onChange={(e) => setCode(e.target.value.toUpperCase())} className="rounded border px-3 py-2 text-sm" style={{ borderColor: "#D9CBB3" }} />
+          <div className="flex items-center gap-2">
+            <input type="number" value={pct} onChange={(e) => setPct(e.target.value)} className="w-20 rounded border px-3 py-2 text-sm" style={{ borderColor: "#D9CBB3" }} />
+            <span className="text-sm">% de descuento</span>
+          </div>
+        </div>
+        <button onClick={() => save({})} className="mt-3 rounded-md px-3 py-1.5 text-xs font-semibold text-white" style={{ backgroundColor: "#0E3A45" }}>
+          {saved ? "✓ Guardado" : "Guardar"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function PaymentDetailsControls({ siteSettings, updateSiteSettings }) {
   const [iban, setIban] = useState(siteSettings?.bankTransferIban || "");
   const [holder, setHolder] = useState(siteSettings?.bankTransferHolder || "");
@@ -5096,6 +5384,10 @@ function HeroMediaAdminSection({ siteSettings, updateSiteSettings }) {
       </div>
 
       <PaymentDetailsControls siteSettings={siteSettings} updateSiteSettings={updateSiteSettings} />
+
+      <DiscountCodeControls siteSettings={siteSettings} updateSiteSettings={updateSiteSettings} />
+
+      <WhatsAppSupportControls siteSettings={siteSettings} updateSiteSettings={updateSiteSettings} />
     </div>
   );
 }

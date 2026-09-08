@@ -118,13 +118,26 @@ export function buildVendorNewOrderEmail(order, vendorLines, vendorName) {
 
 /** Albarán completo para el admin — se manda con cada pedido nuevo, para
  * que no dependa de mirar el panel para enterarse. */
-export function buildAdminOrderEmail(order) {
+/** Albarán completo para el admin — se manda con CADA pedido nuevo, sin
+ * excepción, para que no dependa de mirar el panel para enterarse.
+ * `vendorsWithoutEmail` es la lista de nombres de vendedores de ESTE
+ * pedido que no tienen email guardado — a esos hay que avisarles a mano,
+ * y el email lo deja bien visible arriba del todo para que no se pase por
+ * alto. */
+export function buildAdminOrderEmail(order, vendorsWithoutEmail = []) {
   const addr = order.shippingAddress || {};
+  const needsManualForward = vendorsWithoutEmail.length > 0;
   return {
-    subject: `📦 Nuevo pedido #${order.id.slice(-6)} — ${order.total.toFixed(2)} €`,
+    subject: needsManualForward
+      ? `⚠️ Pedido #${order.id.slice(-6)} — avisa tú a ${vendorsWithoutEmail.join(", ")} (sin email)`
+      : `📦 Nuevo pedido #${order.id.slice(-6)} — ${order.total.toFixed(2)} €`,
     html: `
       <div style="font-family:sans-serif;max-width:480px;margin:auto">
         <h2 style="color:#0E3A45">Nuevo pedido en LonjaYa</h2>
+        ${needsManualForward ? `
+          <div style="background:#FDECEA;border:1px solid #B04A2F;border-radius:8px;padding:12px;margin-bottom:16px">
+            <p style="margin:0;color:#B04A2F"><strong>⚠️ Acción tuya requerida:</strong> ${vendorsWithoutEmail.join(", ")} no ${vendorsWithoutEmail.length > 1 ? "tienen" : "tiene"} email registrado en LonjaYa, así que no ${vendorsWithoutEmail.length > 1 ? "les" : "le"} ha llegado este pedido. Reenvíaselo tú a mano (o pídele que añada su email en su ficha de vendedor).</p>
+          </div>` : ""}
         <p>Pedido <strong>#${order.id.slice(-6)}</strong> · ${new Date(order.date).toLocaleString("es-ES")} · Pago: ${order.payment?.provider || "—"} · Estado: ${order.status || "confirmado"}</p>
         <table style="width:100%;border-collapse:collapse;margin:16px 0">
           ${order.lines.map(lineRow).join("")}
@@ -137,6 +150,27 @@ export function buildAdminOrderEmail(order) {
           <p style="margin:2px 0"><strong>Teléfono:</strong> ${addr.phone || "—"}</p>
           <p style="margin:2px 0"><strong>Dirección:</strong> ${addr.address || ""}, ${addr.city || ""} (${addr.postal || ""})</p>
         </div>
+        ${BRAND_FOOTER}
+      </div>`,
+  };
+}
+
+/** Aviso urgente cuando el propio comprador pulsa "Ya he pagado" — para que
+ * el admin no dependa solo de mirar el banco por su cuenta. */
+export function buildBuyerClaimsPaidEmail(order) {
+  const addr = order.shippingAddress || {};
+  const isBizum = order.payment?.provider === "bizum";
+  return {
+    subject: `🔔 ${addr.name || "Un comprador"} dice que ya ha pagado el pedido #${order.id.slice(-6)}`,
+    html: `
+      <div style="font-family:sans-serif;max-width:480px;margin:auto">
+        <h2 style="color:#0E3A45">Aviso de pago del comprador</h2>
+        <p><strong>${addr.name || ""}</strong> ha marcado como pagado su pedido <strong>#${order.id.slice(-6)}</strong> por ${isBizum ? "Bizum" : "transferencia"}.</p>
+        <div style="background:#F6F8F7;border-radius:8px;padding:14px;margin:16px 0">
+          <p style="margin:2px 0"><strong>Importe a comprobar:</strong> ${order.total.toFixed(2)} €</p>
+          <p style="margin:2px 0"><strong>Concepto a buscar:</strong> LONJAYA-${order.id.slice(-6)}</p>
+        </div>
+        <p>Revisa tu cuenta y, si lo ves llegado, confírmalo en el panel de admin (sección "Pedidos pendientes de pago") para que se prepare el pedido de verdad.</p>
         ${BRAND_FOOTER}
       </div>`,
   };
