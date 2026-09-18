@@ -19,7 +19,6 @@ import {
   PlusCircle, Pencil, BarChart3, Users, Waves, Snowflake, Sun,
   Building2, Globe, ImagePlus, Mail
 } from "lucide-react";
-
 /* ------------------------------------------------------------------ */
 /*  DATA                                                               */
 /* ------------------------------------------------------------------ */
@@ -3082,7 +3081,7 @@ function CheckoutView({ lines, total, user, placeOrder, placeOrderPendingPayment
             <>
               <div className="mb-3 grid grid-cols-3 gap-2">
                 {[
-                  { id: "paypal", label: "PayPal", disabled: true },
+                  { id: "paypal", label: "PayPal" },
                   { id: "transferencia", label: "Transferencia" },
                   { id: "bizum", label: "Bizum" },
                 ].map((m) => (
@@ -3104,10 +3103,20 @@ function CheckoutView({ lines, total, user, placeOrder, placeOrderPendingPayment
               </div>
 
               {form.payment === "paypal" && (
-                <p className="rounded-md border border-dashed p-3 text-xs" style={{ borderColor: "#D9CBB3", color: "#5C6B6E" }}>
-                  El pago con PayPal no está disponible temporalmente. Usa transferencia bancaria o Bizum mientras tanto.
-                </p>
-              )}
+  <PayPalCheckoutButton
+    amount={grandTotal}
+    submitting={submitting}
+    setSubmitting={setSubmitting}
+    onError={setPayError}
+    onSuccess={async (payment) => {
+      try {
+        await placeOrder(form, payment);
+      } catch (err) {
+        setPayError("El pago se completó pero hubo un problema al guardar tu pedido. Contacta con nosotros.");
+      }
+    }}
+  />
+)}
 
               {(form.payment === "transferencia" || form.payment === "bizum") && (
                 <div className="rounded-md border p-3" style={{ borderColor: "#D9CBB3" }}>
