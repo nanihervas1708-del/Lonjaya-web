@@ -19,6 +19,7 @@ import {
   PlusCircle, Pencil, BarChart3, Users, Waves, Snowflake, Sun,
   Building2, Globe, ImagePlus, Mail
 } from "lucide-react";
+
 /* ------------------------------------------------------------------ */
 /*  DATA                                                               */
 /* ------------------------------------------------------------------ */
@@ -685,6 +686,37 @@ export default function App() {
 
       setProducts(p); setVendors(v); setOrders(o); setCart(c); setUser(u); setPoints(pts); setAuctions(auc); setSiteSettings(settings); setReviews(rv); setCommunityPosts(posts); setRecipes(recs); setFlashOffers(flash);
       setReady(true);
+
+      // Vuelta desde Stripe: la página se recarga entera, así que hay que
+      // reengancharse al pedido por su id (viene en la URL), no por estado
+      // en memoria. El webhook es quien confirma de verdad — aquí solo
+      // mostramos el resultado y, si hace falta, esperamos un poco a que
+      // llegue esa confirmación.
+      const params = new URLSearchParams(window.location.search);
+      const stripeStatus = params.get("stripe_status");
+      const stripeOrderId = params.get("order");
+      if (stripeStatus && stripeOrderId) {
+        window.history.replaceState({}, "", window.location.pathname);
+        if (stripeStatus === "cancel") {
+          setTimeout(() => showToast("Pago cancelado — tu pedido sigue reservado, puedes volver a intentarlo desde \"Mis pedidos\"."), 300);
+          setView("mis-pedidos");
+        } else {
+          let found = o.find((ord) => ord.id === stripeOrderId);
+          let tries = 0;
+          while (found && found.status !== "confirmado" && tries < 6) {
+            await new Promise((r) => setTimeout(r, 1500));
+            const fresh = await loadShared("lonja:orders", o);
+            found = fresh.find((ord) => ord.id === stripeOrderId);
+            if (found) setOrders(fresh);
+            tries++;
+          }
+          if (found) {
+            setLastOrder(found);
+            setView(found.status === "confirmado" ? "confirm" : "mis-pedidos");
+          }
+        }
+      }
+
       trackPageView("home");
     })();
 
@@ -1146,6 +1178,65 @@ export default function App() {
     sendAdminNotification(buildAdminOrderEmail(order, vendorsMissingEmail(order)));
 
     goTo("pago-pendiente", {});
+    return order;
+  };
+
+  /* Igual que arriba, pero para pago con tarjeta (Stripe): no se manda el
+   * email de "transfiere tú a mano" — en vez de eso, el navegador redirige
+   * a la pasarela de Stripe, y es el webhook del servidor (no el navegador)
+   * quien confirma el pedido de verdad cuando el pago se completa. */
+  const placeOrderForStripe = async (shippingAddress, discountAmount = 0) => {
+    const shippingCost = shippingCostForWeight(cartWeightKg(cartLines));
+    const earnedPoints = Math.round(cartTotal * LOYALTY_CONFIG.pointsPerEuro);
+    const order = {
+      id: "o" + Date.now(),
+      user: user?.name || "Invitado",
+      date: new Date().toISOString(),
+      lines: cartLines.map((l) => {
+        const rate = vendors.find((v) => v.id === l.product.vendorId)?.commissionRate ?? DEFAULT_COMMISSION;
+        const gross = l.unitPrice * l.qty;
+        return {
+          productId: l.productId, name: l.product.name + (l.variantLabel ? ` (${l.variantLabel})` : ""), vendorId: l.product.vendorId, qty: l.qty, unit: l.product.unit, price: l.unitPrice,
+          commissionRate: rate, commission: Math.round(gross * rate * 100) / 100, vendorPayout: Math.round(gross * (1 - rate) * 100) / 100,
+        };
+      }),
+      subtotal: cartTotal,
+      shippingCost,
+      discountAmount,
+      total: Math.max(0, cartTotal + shippingCost - discountAmount),
+      shippingAddress,
+      payment: { provider: "stripe" },
+      status: "pendiente_pago",
+      pointsEarned: earnedPoints,
+    };
+    const next = [order, ...orders];
+    const saved = await saveShared("lonja:orders", next);
+    if (!saved) {
+      showToast("No se pudo reservar tu pedido. Inténtalo de nuevo en unos minutos.");
+      throw new Error("No se pudo guardar el pedido antes de ir a Stripe");
+    }
+    setOrders(next);
+    setLastOrder(order);
+
+    const res = await fetch("/.netlify/functions/stripe-create-checkout", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        orderId: order.id,
+        amount: order.total,
+        email: shippingAddress.email,
+        description: `Pedido LonjaYa #${order.id.slice(-6)}`,
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.url) throw new Error(data.error || "No se pudo iniciar el pago con tarjeta");
+
+    // El carrito se vacía aquí porque a partir de este punto el pedido ya
+    // está reservado; si el pago se cancela en Stripe, el pedido se queda
+    // en "pendiente_pago" en vez de perderse.
+    setCart([]);
+    await savePersonal("lonja:cart", []);
+    window.location.href = data.url;
     return order;
   };
 
@@ -1625,7 +1716,7 @@ export default function App() {
       {/* ---------------- MAIN ---------------- */}
       <main className="mx-auto max-w-7xl px-4 pb-24 pt-6">
         {view === "home" && (
-          <HomeView products={storefrontProducts} vendors={vendors} goTo={goTo} addToCart={addToCart} siteSettings={siteSettings} setFilters={setFilters} reviews={reviews} />
+          <HomeView products={storefrontProducts} vendors={vendors} goTo={goTo} addToCart={addToCart} siteSettings={siteSettings} setFilters={setFilters} reviews={reviews} flashOffers={flashOffers} />
         )}
         {view === "sell" && <SellerSignupView registerSeller={registerSeller} categories={CATEGORIES} goTo={goTo} />}
         {view === "catalog" && (
@@ -1654,7 +1745,7 @@ export default function App() {
           <CartView lines={cartLines} updateQty={updateQty} removeFromCart={removeFromCart} total={cartTotal} goTo={goTo} />
         )}
         {view === "checkout" && (
-          <CheckoutView lines={cartLines} total={cartTotal} user={user} placeOrder={placeOrder} placeOrderPendingPayment={placeOrderPendingPayment} goTo={goTo} siteSettings={siteSettings} />
+          <CheckoutView lines={cartLines} total={cartTotal} user={user} placeOrder={placeOrder} placeOrderPendingPayment={placeOrderPendingPayment} placeOrderForStripe={placeOrderForStripe} goTo={goTo} siteSettings={siteSettings} />
         )}
         {view === "ofertas-flash" && (
           <FlashOffersView flashOffers={flashOffers} products={products} vendors={vendors} goTo={goTo} addToCart={addToCart} />
@@ -1867,13 +1958,39 @@ function ProductCard({ product, vendor, onOpen, onAdd }) {
 /*  HOME                                                                */
 /* ------------------------------------------------------------------ */
 
-function HomeView({ products, vendors, goTo, addToCart, siteSettings, setFilters, reviews }) {
+function HomeFlashOfferCard({ offer, product, goTo }) {
+  const { h, m, s, expired } = useCountdownTo(offer.endsAt);
+  if (expired) return null;
+  const pct = Math.round((1 - offer.offerPrice / product.price) * 100);
+
+  return (
+    <button
+      onClick={() => goTo("product", { productId: product.id })}
+      className="flex flex-col items-start rounded-lg p-3 text-left transition-transform hover:-translate-y-0.5"
+      style={{ backgroundColor: "#1E3A40", border: "1px solid #E85D4266" }}
+    >
+      <span className="text-4xl">{product.emoji}</span>
+      <span className="mt-2 text-xs font-semibold text-white">{product.name}</span>
+      <div className="mt-1 flex items-center gap-1">
+        {pct > 0 && <span className="rounded px-1.5 py-0.5 text-[10px] font-bold" style={{ backgroundColor: "#E85D42", color: "white" }}>-{pct}%</span>}
+        <span className="rounded px-1.5 py-0.5 text-[10px] font-bold" style={{ backgroundColor: "#0E3A45", color: "#E4D9C4" }}>⏱ {h}:{m}:{s}</span>
+      </div>
+      <div className="mt-1.5 flex items-baseline gap-1.5">
+        <span className="text-sm font-bold" style={{ color: "#E85D42", fontFamily: "'IBM Plex Mono', monospace" }}>{eur(offer.offerPrice)}</span>
+        <span className="text-[11px] line-through" style={{ color: "#7C8B8E" }}>{eur(product.price)}</span>
+      </div>
+    </button>
+  );
+}
+
+function HomeView({ products, vendors, goTo, addToCart, siteSettings, setFilters, reviews, flashOffers }) {
   const featured = products.filter((p) => p.freshness === "hoy").slice(0, 8);
   const vendorOf = (id) => vendors.find((v) => v.id === id);
   const countdown = useMarketCountdown();
   // Solo productos con un descuento real puesto por su propio vendedor
   // (compareAtPrice > price) — nunca un porcentaje inventado por la web.
   const flashProducts = products.filter((p) => p.compareAtPrice && p.compareAtPrice > p.price);
+  const liveFlashOffers = activeOffers(flashOffers || []).sort((a, b) => new Date(a.endsAt) - new Date(b.endsAt));
   const topVendors = [...vendors].filter((v) => v.status === "activo").sort((a, b) => b.rating - a.rating).slice(0, 3);
   const heroVideoUrl = siteSettings?.heroVideoUrl;
   const [videoMuted, setVideoMuted] = useState(true);
@@ -1957,14 +2074,14 @@ function HomeView({ products, vendors, goTo, addToCart, siteSettings, setFilters
       </section>
 
       {/* FLASH DEALS */}
-      {flashProducts.length > 0 && (
+      {(flashProducts.length > 0 || liveFlashOffers.length > 0) && (
         <section className="overflow-hidden rounded-xl" style={{ backgroundColor: "#16242A" }}>
           <div className="flex flex-col items-start justify-between gap-3 px-5 pt-5 sm:flex-row sm:items-center">
             <div className="flex items-center gap-2">
               <span className="flex h-7 w-7 items-center justify-center rounded-full" style={{ backgroundColor: "#E85D42" }}>⚡</span>
               <div>
                 <h2 className="text-lg font-semibold text-white" style={{ fontFamily: "'Fraunces', serif" }}>Ofertas del día</h2>
-                <p className="text-[11px]" style={{ color: "#9FB0AC" }}>Rebajas reales puestas por cada vendedor — solo hasta el cierre de hoy</p>
+                <p className="text-[11px]" style={{ color: "#9FB0AC" }}>Rebajas reales puestas por cada vendedor y ofertas flash con caducidad — solo hasta que se acaben</p>
               </div>
             </div>
             <div className="flex items-center gap-1.5 rounded-md px-3 py-1.5" style={{ backgroundColor: "#0E3A45" }}>
@@ -1978,6 +2095,11 @@ function HomeView({ products, vendors, goTo, addToCart, siteSettings, setFilters
             </div>
           </div>
           <div className="grid grid-cols-2 gap-3 p-5 sm:grid-cols-4">
+            {liveFlashOffers.map((o) => {
+              const product = products.find((p) => p.id === o.productId);
+              if (!product) return null;
+              return <HomeFlashOfferCard key={o.id} offer={o} product={product} goTo={goTo} />;
+            })}
             {flashProducts.map((p) => {
               const pct = Math.round((1 - p.price / p.compareAtPrice) * 100);
               return (
@@ -2979,12 +3101,12 @@ function CartView({ lines, updateQty, removeFromCart, total, goTo }) {
 /*  CHECKOUT                                                            */
 /* ------------------------------------------------------------------ */
 
-function CheckoutView({ lines, total, user, placeOrder, placeOrderPendingPayment, goTo, siteSettings }) {
+function CheckoutView({ lines, total, user, placeOrder, placeOrderPendingPayment, placeOrderForStripe, goTo, siteSettings }) {
   const [form, setForm] = useState({
     name: user?.role === "comprador" ? user?.name || "" : "",
     email: user?.role === "comprador" ? user?.email || "" : "",
     phone: user?.role === "comprador" ? user?.phone || "" : "",
-    address: "", city: "", postal: "", payment: "transferencia", ageRange: "", deliveryDate: "",
+    address: "", city: "", postal: "", payment: "stripe", ageRange: "", deliveryDate: "",
   });
   const [submitting, setSubmitting] = useState(false);
   const [payError, setPayError] = useState("");
@@ -3026,27 +3148,23 @@ function CheckoutView({ lines, total, user, placeOrder, placeOrderPendingPayment
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  if (user?.role !== "comprador") {
-    return (
-      <div className="mx-auto flex max-w-sm flex-col items-center gap-3 py-20 text-center">
-        <User size={32} color="#5C6B6E" />
-        <h2 className="text-lg font-semibold" style={{ fontFamily: "'Fraunces', serif" }}>Inicia sesión para continuar</h2>
-        <p className="text-sm" style={{ color: "#5C6B6E" }}>Necesitas una cuenta de comprador para finalizar tu pedido — es gratis y solo lleva un minuto.</p>
-        <div className="mt-2 flex w-full flex-col gap-2">
-          <button onClick={() => goTo("login")} className="rounded-md py-2.5 text-sm font-semibold text-white" style={{ backgroundColor: "#0E3A45" }}>Iniciar sesión</button>
-          <button onClick={() => goTo("comprador-alta")} className="rounded-md border py-2.5 text-sm font-semibold" style={{ borderColor: "#D9CBB3" }}>Crear cuenta</button>
-        </div>
-        <button onClick={() => goTo("cart")} className="mt-2 text-xs font-medium" style={{ color: "#5C6B6E" }}>Volver a la cesta</button>
-      </div>
-    );
-  }
-
   const canSubmit = form.name && form.email.includes("@") && form.phone.trim() && form.address && form.city && form.postal;
 
   return (
     <div className="grid grid-cols-1 gap-8 lg:grid-cols-3">
       <div className="lg:col-span-2">
         <h1 className="mb-4 text-xl font-semibold" style={{ fontFamily: "'Fraunces', serif" }}>Finalizar pedido</h1>
+
+        {user?.role !== "comprador" && (
+          <div className="mb-4 flex flex-wrap items-center justify-between gap-2 rounded-lg border p-3" style={{ borderColor: "#D9CBB3", backgroundColor: "#F6F8F7" }}>
+            <p className="text-xs" style={{ color: "#5C6B6E" }}>Puedes comprar sin cuenta. Si inicias sesión, acumulas puntos y ves tus pedidos guardados.</p>
+            <div className="flex gap-2">
+              <button onClick={() => goTo("login")} className="rounded-md border px-3 py-1.5 text-xs font-semibold" style={{ borderColor: "#D9CBB3" }}>Iniciar sesión</button>
+              <button onClick={() => goTo("comprador-alta")} className="rounded-md px-3 py-1.5 text-xs font-semibold text-white" style={{ backgroundColor: "#0E3A45" }}>Crear cuenta</button>
+            </div>
+          </div>
+        )}
+
         <div className="rounded-lg border bg-white p-5" style={{ borderColor: "#E4D9C4" }}>
           <h2 className="mb-3 text-sm font-semibold">Dirección de entrega</h2>
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
@@ -3082,7 +3200,7 @@ function CheckoutView({ lines, total, user, placeOrder, placeOrderPendingPayment
               <div className="mb-3 grid grid-cols-3 gap-2">
                 {[
                   { id: "paypal", label: "PayPal" },
-                  { id: "transferencia", label: "Transferencia" },
+                  { id: "stripe", label: "Tarjeta" },
                   { id: "bizum", label: "Bizum" },
                 ].map((m) => (
                   <button
@@ -3103,20 +3221,26 @@ function CheckoutView({ lines, total, user, placeOrder, placeOrderPendingPayment
               </div>
 
               {form.payment === "paypal" && (
-  <PayPalCheckoutButton
-    amount={grandTotal}
-    submitting={submitting}
-    setSubmitting={setSubmitting}
-    onError={setPayError}
-    onSuccess={async (payment) => {
-      try {
-        await placeOrder(form, payment);
-      } catch (err) {
-        setPayError("El pago se completó pero hubo un problema al guardar tu pedido. Contacta con nosotros.");
-      }
-    }}
-  />
-)}
+                <PayPalCheckoutButton
+                  amount={grandTotal}
+                  submitting={submitting}
+                  setSubmitting={setSubmitting}
+                  onError={setPayError}
+                  onSuccess={async (payment) => { await placeOrder(form, payment); }}
+                />
+              )}
+
+              {form.payment === "stripe" && (
+                <StripeCheckoutButton
+                  amount={grandTotal}
+                  shippingAddress={form}
+                  submitting={submitting}
+                  setSubmitting={setSubmitting}
+                  onError={setPayError}
+                  discountAmount={discountAmount}
+                  placeOrderForStripe={placeOrderForStripe}
+                />
+              )}
 
               {(form.payment === "transferencia" || form.payment === "bizum") && (
                 <div className="rounded-md border p-3" style={{ borderColor: "#D9CBB3" }}>
@@ -3243,6 +3367,31 @@ function loadPayPalSdk() {
     document.body.appendChild(script);
   });
   return paypalSdkPromise;
+}
+
+function StripeCheckoutButton({ amount, shippingAddress, submitting, setSubmitting, onError, discountAmount, placeOrderForStripe }) {
+  const pay = async () => {
+    setSubmitting(true);
+    onError("");
+    try {
+      await placeOrderForStripe(shippingAddress, discountAmount);
+      // A partir de aquí el navegador ya está redirigiendo a Stripe.
+    } catch (err) {
+      onError(err.message || "No se pudo iniciar el pago con tarjeta.");
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <button
+      disabled={submitting}
+      onClick={pay}
+      className="flex w-full items-center justify-center gap-2 rounded-md py-2.5 text-sm font-semibold text-white disabled:opacity-50"
+      style={{ backgroundColor: "#0E3A45" }}
+    >
+      {submitting ? "Redirigiendo a pago seguro…" : <>💳 Pagar {eur(amount)} con tarjeta</>}
+    </button>
+  );
 }
 
 function PayPalCheckoutButton({ amount, submitting, setSubmitting, onSuccess, onError }) {
