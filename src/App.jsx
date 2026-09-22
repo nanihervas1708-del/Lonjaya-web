@@ -230,6 +230,62 @@ async function savePersonal(key, value) {
 /* ------------------------------------------------------------------ */
 
 /* Cuenta atrás hasta el cierre de la lonja de hoy (20:00), o de mañana si ya ha pasado */
+/** Actualiza el título de la pestaña y las meta tags (descripción, Open
+ * Graph) según la página que se esté viendo — así cada producto, cada
+ * categoría, etc. tiene su propio título real para Google, en vez de que
+ * todas las páginas compartan el mismo título genérico de la portada. */
+function useMetaTags({ title, description, image, path }) {
+  useEffect(() => {
+    const fullTitle = title ? `${title} — LonjaYa` : "LonjaYa — Marketplace de pescado y marisco";
+    document.title = fullTitle;
+
+    const setMeta = (selector, attr, content) => {
+      let el = document.querySelector(selector);
+      if (!el) {
+        el = document.createElement("meta");
+        const [, key, val] = selector.match(/\[(\w+)="([^"]+)"\]/) || [];
+        if (key && val) el.setAttribute(key, val);
+        document.head.appendChild(el);
+      }
+      el.setAttribute(attr, content);
+    };
+
+    const desc = description || "Compra pescado y marisco directo de lonjas, pescaderías, empresas y tiendas online especializadas.";
+    setMeta('meta[name="description"]', "content", desc);
+    setMeta('meta[property="og:title"]', "content", fullTitle);
+    setMeta('meta[property="og:description"]', "content", desc);
+    setMeta('meta[property="og:type"]', "content", "website");
+    setMeta('meta[property="og:url"]', "content", `https://lonjaya.com${path || "/"}`);
+    if (image) setMeta('meta[property="og:image"]', "content", image);
+    setMeta('meta[name="twitter:card"]', "content", image ? "summary_large_image" : "summary");
+
+    let canonical = document.querySelector('link[rel="canonical"]');
+    if (!canonical) {
+      canonical = document.createElement("link");
+      canonical.setAttribute("rel", "canonical");
+      document.head.appendChild(canonical);
+    }
+    canonical.setAttribute("href", `https://lonjaya.com${path || "/"}`);
+  }, [title, description, image, path]);
+}
+
+/** Datos estructurados (Schema.org) para que Google entienda mejor el
+ * contenido — puede mostrar precio/valoración directamente en el buscador. */
+function useStructuredData(data) {
+  useEffect(() => {
+    if (!data) return;
+    let script = document.getElementById("structured-data");
+    if (!script) {
+      script = document.createElement("script");
+      script.id = "structured-data";
+      script.type = "application/ld+json";
+      document.head.appendChild(script);
+    }
+    script.textContent = JSON.stringify(data);
+    return () => { script.textContent = ""; };
+  }, [data]);
+}
+
 function useMarketCountdown() {
   const getTarget = () => {
     const now = new Date();
@@ -687,6 +743,16 @@ export default function App() {
       setProducts(p); setVendors(v); setOrders(o); setCart(c); setUser(u); setPoints(pts); setAuctions(auc); setSiteSettings(settings); setReviews(rv); setCommunityPosts(posts); setRecipes(recs); setFlashOffers(flash);
       setReady(true);
 
+      // Enrutado real: si se entra directamente por una URL de producto,
+      // categoría, etc. (enlace compartido, recarga de página...), mostramos
+      // esa pantalla desde el primer instante, no siempre el inicio.
+      const initial = parseLocationToView();
+      if (initial.view !== "home") {
+        setView(initial.view);
+        if (initial.category !== undefined) setActiveCategory(initial.category);
+        if (initial.productId !== undefined) setActiveProductId(initial.productId);
+      }
+
       // Vuelta desde Stripe: la página se recarga entera, así que hay que
       // reengancharse al pedido por su id (viene en la URL), no por estado
       // en memoria. El webhook es quien confirma de verdad — aquí solo
@@ -722,6 +788,17 @@ export default function App() {
 
     const unsubscribe = onAuthChange(setAuthUser);
 
+    // Botón atrás/adelante del navegador: releemos la URL y actualizamos
+    // la vista, en vez de dejar que el navegador cambie la URL sin que la
+    // app se entere.
+    const onPopState = () => {
+      const parsed = parseLocationToView();
+      setView(parsed.view);
+      if (parsed.category !== undefined) setActiveCategory(parsed.category);
+      if (parsed.productId !== undefined) setActiveProductId(parsed.productId);
+    };
+    window.addEventListener("popstate", onPopState);
+
     // "Latido" cada 20s mientras la pestaña está activa, para poder calcular
     // el tiempo medio de visita en el panel de admin sin depender de un
     // evento de "salida" (que en el navegador no siempre llega a tiempo).
@@ -731,6 +808,7 @@ export default function App() {
 
     return () => {
       unsubscribe();
+      window.removeEventListener("popstate", onPopState);
       clearInterval(heartbeat);
     };
   }, []);
@@ -768,6 +846,44 @@ export default function App() {
     setTimeout(() => setToast(null), 2200);
   }, []);
 
+  /* -------- enrutado real: cada vista tiene su URL propia -------- */
+  const pathForView = (v, extra = {}) => {
+    const cat = extra.category !== undefined ? extra.category : activeCategory;
+    const pid = extra.productId !== undefined ? extra.productId : activeProductId;
+    switch (v) {
+      case "home": return "/";
+      case "catalog": return cat ? `/catalogo/${cat}` : "/catalogo";
+      case "product": return pid ? `/producto/${pid}` : "/catalogo";
+      case "blog": return "/blog";
+      case "recetario": return "/recetario";
+      case "ofertas-flash": return "/ofertas-flash";
+      case "subastas": return "/subastas";
+      case "hosteleria": return "/hosteleria";
+      case "sell": return "/vender";
+      case "contacto": return "/contacto";
+      case "login": return "/acceso";
+      case "comprador-alta": return "/crear-cuenta";
+      default: return `/${v}`; // vistas privadas (admin, carrito, checkout...): path simple, sin indexar
+    }
+  };
+
+  const parseLocationToView = () => {
+    const parts = window.location.pathname.split("/").filter(Boolean);
+    if (parts.length === 0) return { view: "home" };
+    if (parts[0] === "catalogo") return { view: "catalog", category: parts[1] || null };
+    if (parts[0] === "producto" && parts[1]) return { view: "product", productId: parts[1] };
+    if (parts[0] === "blog") return { view: "blog" };
+    if (parts[0] === "recetario") return { view: "recetario" };
+    if (parts[0] === "ofertas-flash") return { view: "ofertas-flash" };
+    if (parts[0] === "subastas") return { view: "subastas" };
+    if (parts[0] === "hosteleria") return { view: "hosteleria" };
+    if (parts[0] === "vender") return { view: "sell" };
+    if (parts[0] === "contacto") return { view: "contacto" };
+    if (parts[0] === "acceso") return { view: "login" };
+    if (parts[0] === "crear-cuenta") return { view: "comprador-alta" };
+    return { view: "home" }; // ruta desconocida: mostramos el inicio en vez de un 404 en blanco
+  };
+
   const goTo = (v, extra = {}) => {
     setView(v);
     window.scrollTo({ top: 0, behavior: "smooth" });
@@ -775,6 +891,8 @@ export default function App() {
     if (extra.category !== undefined) setActiveCategory(extra.category);
     if (extra.productId !== undefined) setActiveProductId(extra.productId);
     if (extra.auctionId !== undefined) setActiveAuctionId(extra.auctionId);
+    const path = pathForView(v, extra);
+    if (window.location.pathname !== path) window.history.pushState({}, "", path);
     trackPageView(v);
     if (v === "product" && extra.productId) {
       const p = products.find((x) => x.id === extra.productId);
@@ -1992,6 +2110,19 @@ function HomeView({ products, vendors, goTo, addToCart, siteSettings, setFilters
   const flashProducts = products.filter((p) => p.compareAtPrice && p.compareAtPrice > p.price);
   const liveFlashOffers = activeOffers(flashOffers || []).sort((a, b) => new Date(a.endsAt) - new Date(b.endsAt));
   const topVendors = [...vendors].filter((v) => v.status === "activo").sort((a, b) => b.rating - a.rating).slice(0, 3);
+
+  useMetaTags({
+    title: "Pescado y marisco fresco de lonja a mesa",
+    description: "Compra pescado y marisco directo de lonjas y pescaderías de toda España, con envío en frío 24h. Trazabilidad de origen, precios de subasta y venta directa.",
+    path: "/",
+  });
+  useStructuredData({
+    "@context": "https://schema.org",
+    "@type": "Organization",
+    name: "LonjaYa",
+    url: "https://lonjaya.com",
+    description: "Marketplace online de pescado y marisco de lonja a mesa.",
+  });
   const heroVideoUrl = siteSettings?.heroVideoUrl;
   const [videoMuted, setVideoMuted] = useState(true);
   const heroVideoRef = useRef(null);
@@ -2264,6 +2395,14 @@ function CatalogView({ products, vendors, activeCategory, filters, setFilters, g
   const vendorOf = (id) => vendors.find((v) => v.id === id);
   const catName = CATEGORIES.find((c) => c.id === activeCategory)?.name || "Todos los productos";
 
+  useMetaTags({
+    title: activeCategory ? `${catName} — comprar online` : "Catálogo — pescado y marisco fresco",
+    description: activeCategory
+      ? `Compra ${catName.toLowerCase()} fresco directo de lonjas y pescaderías de toda España, con envío en frío 24h.`
+      : "Todo el catálogo de pescado y marisco fresco de LonjaYa: pescado blanco, pescado azul, mariscos, moluscos, crustáceos y ahumados.",
+    path: activeCategory ? `/catalogo/${activeCategory}` : "/catalogo",
+  });
+
   return (
     <div className="flex flex-col gap-6 lg:flex-row">
       <aside className="shrink-0 lg:w-56">
@@ -2398,6 +2537,28 @@ function ProductView({ product, vendor, allProducts, vendors, addToCart, goTo, u
   const { rating, count } = productReviews(product.id);
   const activeVariant = product.variants?.find((v) => v.label === variantLabel);
   const displayPrice = activeVariant ? activeVariant.price : product.price;
+
+  useMetaTags({
+    title: `${product.name} — ${eur(product.price)}/${product.unit}`,
+    description: `${product.name} de ${vendor?.name || "un vendedor verificado"}. ${product.desc || ""} Compra directa en LonjaYa, envío en frío 24h.`.slice(0, 160),
+    image: product.image || undefined,
+    path: `/producto/${product.id}`,
+  });
+  useStructuredData({
+    "@context": "https://schema.org",
+    "@type": "Product",
+    name: product.name,
+    image: product.image ? [product.image] : undefined,
+    description: product.desc || product.name,
+    offers: {
+      "@type": "Offer",
+      priceCurrency: "EUR",
+      price: displayPrice,
+      availability: product.stock > 0 ? "https://schema.org/InStock" : "https://schema.org/OutOfStock",
+      url: `https://lonjaya.com/producto/${product.id}`,
+    },
+    ...(count > 0 ? { aggregateRating: { "@type": "AggregateRating", ratingValue: rating, reviewCount: count } } : {}),
+  });
 
   const alternatives = useMemo(() => {
     return allProducts

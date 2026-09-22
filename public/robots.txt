@@ -1,0 +1,8 @@
+User-agent: *
+Allow: /
+Disallow: /admin
+Disallow: /vendor-dash
+Disallow: /pago-pendiente
+Disallow: /checkout
+
+Sitemap: https://lonjaya.com/sitemap.xml

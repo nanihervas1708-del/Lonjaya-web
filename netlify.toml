@@ -5,3 +5,20 @@
 
 [functions]
   node_bundler = "esbuild"
+
+# El sitemap se genera al vuelo con los productos reales.
+[[redirects]]
+  from = "/sitemap.xml"
+  to = "/.netlify/functions/sitemap"
+  status = 200
+
+# LonjaYa usa URLs reales por página (SPA con enrutado propio, sin
+# recargar). Sin esta regla, entrar directamente en algo como
+# /producto/abc123 (por ejemplo, desde un enlace compartido) daría un
+# 404 de Netlify en vez de dejar que la propia app decida qué mostrar.
+# Va la última para no interceptar los archivos estáticos ni las
+# funciones de servidor.
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
