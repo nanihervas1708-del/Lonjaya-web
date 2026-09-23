@@ -881,6 +881,7 @@ export default function App() {
     if (parts[0] === "contacto") return { view: "contacto" };
     if (parts[0] === "acceso") return { view: "login" };
     if (parts[0] === "crear-cuenta") return { view: "comprador-alta" };
+    if (parts[0] === "mis-pedidos") return { view: "mis-pedidos" };
     return { view: "home" }; // ruta desconocida: mostramos el inicio en vez de un 404 en blanco
   };
 
