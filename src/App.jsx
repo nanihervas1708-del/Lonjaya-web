@@ -667,7 +667,7 @@ function SplashScreen({ onEnter, siteSettings, products, vendors, goTo }) {
 
 export default function App() {
   const [ready, setReady] = useState(false);
-  const [showSplash, setShowSplash] = useState(true);
+  const [showSplash, setShowSplash] = useState(false);
   const [products, setProducts] = useState([]);
   const [vendors, setVendors] = useState([]);
   const [auctions, setAuctions] = useState([]);
