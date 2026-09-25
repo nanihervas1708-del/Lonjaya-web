@@ -1,0 +1,10 @@
+[
+  {
+    "relation": ["delegate_permission/common.handle_all_urls"],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "com.lonjaya.twa",
+      "sha256_cert_fingerprints": ["68:BA:24:13:5D:47:10:59:FC:33:ED:99:5D:DC:F4:0F:56:7B:72:36:3D:AE:3D:49:64:B9:35:C6:D0:91:33:52"]
+    }
+  }
+]
