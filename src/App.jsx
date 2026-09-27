@@ -584,7 +584,7 @@ function SplashScreen({ onEnter, siteSettings, products, vendors, goTo }) {
           foto todavía, usamos un degradado de marca como respaldo. */}
       <div className="absolute inset-0">
         {splashImageUrl ? (
-          <img src={splashImageUrl} alt="" className="h-full w-full object-cover" />
+          <img loading="lazy" src={splashImageUrl} alt="" className="h-full w-full object-cover" />
         ) : (
           <div className="h-full w-full" style={{ background: "radial-gradient(circle at 50% 35%, #1E3A40 0%, #082630 75%)" }} />
         )}
@@ -2018,7 +2018,7 @@ function ProductCard({ product, vendor, onOpen, onAdd }) {
           className="flex h-36 w-full items-center justify-center overflow-hidden text-6xl"
           style={{ background: "linear-gradient(160deg,#EAF2EF,#DCEAE3)" }}
         >
-          {product.image ? <img src={product.image} alt={product.name} className="h-full w-full object-cover" /> : product.emoji}
+          {product.image ? <img loading="lazy" src={product.image} alt={product.name} className="h-full w-full object-cover" /> : product.emoji}
         </div>
         <div className="flex w-full flex-col gap-1.5 p-3">
           <div className="flex items-center justify-between gap-2">
@@ -2660,7 +2660,7 @@ function ProductView({ product, vendor, allProducts, vendors, addToCart, goTo, u
                       style={{ borderColor: "#E4D9C4" }}
                     >
                       <div className="flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded text-2xl" style={{ background: "#EAF2EF" }}>
-                        {alt.image ? <img src={alt.image} alt="" className="h-full w-full object-cover" /> : alt.emoji}
+                        {alt.image ? <img loading="lazy" src={alt.image} alt="" className="h-full w-full object-cover" /> : alt.emoji}
                       </div>
                       <div className="flex-1">
                         <p className="text-xs font-semibold">{alt.name}</p>
@@ -2801,7 +2801,7 @@ function BlogView({ posts, vendors, products, user, goTo, addCommunityPost, isAd
                 )}
               </div>
               <p className="mt-2 text-sm" style={{ color: "#3A4649" }}>{post.body}</p>
-              {post.image && <img src={post.image} alt="" className="mt-2 max-h-56 w-full rounded-md object-cover" />}
+              {post.image && <img loading="lazy" src={post.image} alt="" className="mt-2 max-h-56 w-full rounded-md object-cover" />}
               {isAdmin && (
                 <button onClick={() => adminHidePost(post.id)} className="mt-2 text-[11px] font-medium underline" style={{ color: "#B04A2F" }}>
                   Ocultar (moderación)
@@ -2881,7 +2881,7 @@ function RecipeCard({ recipe, isAdmin, adminHideRecipe }) {
     <div className="overflow-hidden rounded-lg border bg-white" style={{ borderColor: "#E4D9C4" }}>
       <button onClick={() => setOpen((o) => !o)} className="block w-full text-left">
         <div className="flex h-40 items-center justify-center overflow-hidden" style={{ backgroundColor: "#EAF2EF" }}>
-          {recipe.image ? <img src={recipe.image} alt={recipe.title} className="h-full w-full object-cover" /> : <span className="text-5xl">🍽️</span>}
+          {recipe.image ? <img loading="lazy" src={recipe.image} alt={recipe.title} className="h-full w-full object-cover" /> : <span className="text-5xl">🍽️</span>}
         </div>
         <div className="p-3">
           <p className="text-sm font-semibold">{recipe.title}</p>
@@ -2968,7 +2968,7 @@ function FlashOfferCard({ offer, product, vendor, goTo, addToCart }) {
     <div className="overflow-hidden rounded-xl border bg-white" style={{ borderColor: "#E4D9C4" }}>
       <button onClick={() => goTo("product", { productId: product.id })} className="block w-full text-left">
         <div className="flex h-36 items-center justify-center overflow-hidden text-6xl" style={{ background: "linear-gradient(160deg,#EAF2EF,#DCEAE3)" }}>
-          {product.image ? <img src={product.image} alt={product.name} className="h-full w-full object-cover" /> : product.emoji}
+          {product.image ? <img loading="lazy" src={product.image} alt={product.name} className="h-full w-full object-cover" /> : product.emoji}
         </div>
         <div className="p-3">
           <p className="text-xs" style={{ color: "#5C6B6E" }}>{vendor?.name}</p>
@@ -3064,7 +3064,7 @@ function AuctionsView({ auctions, products, vendors, user, goTo, reserveAuctionF
               <div key={a.id} className="overflow-hidden rounded-xl" style={{ backgroundColor: "#16242A" }}>
                 <div className="flex h-40 items-center justify-center overflow-hidden" style={{ background: "linear-gradient(160deg,#1E3A40,#0E3A45)" }}>
                   {a.image || product?.image ? (
-                    <img src={a.image || product.image} alt={product?.name} className="h-full w-full object-cover" />
+                    <img loading="lazy" src={a.image || product.image} alt={product?.name} className="h-full w-full object-cover" />
                   ) : (
                     <span className="text-6xl">{product?.emoji || "🐟"}</span>
                   )}
@@ -3220,7 +3220,7 @@ function CartView({ lines, updateQty, removeFromCart, total, goTo }) {
           {lines.map((l) => (
             <div key={l.productId + (l.variantLabel || "")} className="flex items-center gap-3 rounded-lg border bg-white p-3" style={{ borderColor: "#E4D9C4" }}>
               <div className="flex h-16 w-16 shrink-0 items-center justify-center rounded text-3xl overflow-hidden" style={{ background: "#EAF2EF" }}>
-                {l.product.image ? <img src={l.product.image} alt={l.product.name} className="h-full w-full object-cover" /> : l.product.emoji}
+                {l.product.image ? <img loading="lazy" src={l.product.image} alt={l.product.name} className="h-full w-full object-cover" /> : l.product.emoji}
               </div>
               <div className="flex-1">
                 <p className="text-sm font-semibold">{l.product.name}{l.variantLabel && <span className="font-normal" style={{ color: "#5C6B6E" }}> · {l.variantLabel}</span>}</p>
@@ -4659,7 +4659,7 @@ function VendorDashboard({ vendor, products, orders, upsertProduct, deleteProduc
             {products.map((p) => (
               <div key={p.id} className="flex items-center gap-3 rounded-lg border bg-white p-3" style={{ borderColor: "#E4D9C4" }}>
                 <div className="flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded text-2xl" style={{ background: "#EAF2EF" }}>
-                  {p.image ? <img src={p.image} alt="" className="h-full w-full object-cover" /> : p.emoji}
+                  {p.image ? <img loading="lazy" src={p.image} alt="" className="h-full w-full object-cover" /> : p.emoji}
                 </div>
                 <div className="flex-1">
                   <p className="text-sm font-semibold">{p.name}</p>
@@ -4796,7 +4796,7 @@ function ProductEditorModal({ product, categories, onClose, onSave }) {
           <label className="mb-1 block text-xs font-medium" style={{ color: "#5C6B6E" }}>Foto del producto</label>
           <div className="flex items-center gap-3">
             <div className="flex h-16 w-16 shrink-0 items-center justify-center overflow-hidden rounded-lg text-3xl" style={{ background: "#EAF2EF" }}>
-              {form.image ? <img src={form.image} alt="" className="h-full w-full object-cover" /> : form.emoji}
+              {form.image ? <img loading="lazy" src={form.image} alt="" className="h-full w-full object-cover" /> : form.emoji}
             </div>
             <div className="flex-1">
               <label className="inline-flex cursor-pointer items-center gap-1.5 rounded-md border px-3 py-1.5 text-xs font-medium" style={{ borderColor: "#D9CBB3" }}>
@@ -5176,7 +5176,7 @@ function AuctionsAdminSection({ vendors, products, auctions, createAuction, canc
 
           <div className="mb-2 flex items-center gap-3">
             <div className="flex h-14 w-14 shrink-0 items-center justify-center overflow-hidden rounded-lg text-2xl" style={{ background: "#EAF2EF" }}>
-              {form.image ? <img src={form.image} alt="" className="h-full w-full object-cover" /> : (selectedProduct?.emoji || "🐟")}
+              {form.image ? <img loading="lazy" src={form.image} alt="" className="h-full w-full object-cover" /> : (selectedProduct?.emoji || "🐟")}
             </div>
             <label className="inline-flex cursor-pointer items-center gap-1.5 rounded-md border px-3 py-1.5 text-xs font-medium" style={{ borderColor: "#D9CBB3" }}>
               <ImagePlus size={14} /> {uploading ? "Subiendo…" : "Foto de la subasta (opcional)"}
@@ -5377,7 +5377,7 @@ function ProductsAdminSection({ products, vendors, upsertProduct }) {
                     <td className="px-3 py-2">
                       <div className="flex items-center gap-2">
                         <div className="flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-md" style={{ backgroundColor: "#EAF2EF" }}>
-                          {p.image ? <img src={p.image} alt={p.name} className="h-full w-full object-cover" /> : <span className="text-lg">{p.emoji || "🐟"}</span>}
+                          {p.image ? <img loading="lazy" src={p.image} alt={p.name} className="h-full w-full object-cover" /> : <span className="text-lg">{p.emoji || "🐟"}</span>}
                         </div>
                         <label className="flex cursor-pointer items-center gap-1 rounded-md border px-1.5 py-1 text-[10px] font-medium" style={{ borderColor: "#D9CBB3" }}>
                           <ImagePlus size={11} /> {uploading ? "…" : p.image ? "Cambiar" : "Subir"}
@@ -5455,7 +5455,7 @@ function SplashMediaControls({ siteSettings, updateSiteSettings }) {
           <p className="mb-2 text-xs font-semibold">Foto de fondo</p>
           {imageUrl ? (
             <div className="flex items-center gap-2">
-              <img src={imageUrl} alt="" className="h-16 w-16 rounded-md object-cover" />
+              <img loading="lazy" src={imageUrl} alt="" className="h-16 w-16 rounded-md object-cover" />
               <div className="flex flex-col gap-1">
                 <label className="inline-flex cursor-pointer items-center gap-1 rounded-md border px-2 py-1 text-[11px] font-medium" style={{ borderColor: "#D9CBB3" }}>
                   {uploadingImg ? "Subiendo…" : "Cambiar"}
