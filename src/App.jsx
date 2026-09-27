@@ -1784,52 +1784,45 @@ export default function App() {
           >
             Todo
           </button>
-          <button
-            onClick={() => goTo("subastas")}
-            className="shrink-0 rounded px-3 py-1.5 text-xs font-semibold tracking-wide"
-            style={{ color: "#E85D42", backgroundColor: view === "subastas" ? "#1A4650" : "transparent" }}
-          >
-            ⚡ Subastas
-          </button>
-          <button
-            onClick={() => goTo("ofertas-flash")}
-            className="shrink-0 rounded px-3 py-1.5 text-xs font-semibold tracking-wide"
-            style={{ color: "#E85D42", backgroundColor: view === "ofertas-flash" ? "#1A4650" : "transparent" }}
-          >
-            🔥 Ofertas Flash
-          </button>
-          <button
-            onClick={() => goTo("blog")}
-            className="shrink-0 rounded px-3 py-1.5 text-xs font-semibold tracking-wide"
-            style={{ color: "#F6F8F7", backgroundColor: view === "blog" ? "#1A4650" : "transparent" }}
-          >
-            📝 Blog
-          </button>
-          <button
-            onClick={() => goTo("recetario")}
-            className="shrink-0 rounded px-3 py-1.5 text-xs font-semibold tracking-wide"
-            style={{ color: "#F6F8F7", backgroundColor: view === "recetario" ? "#1A4650" : "transparent" }}
-          >
-            🍽️ Recetario
-          </button>
-          <button
-            onClick={() => goTo("hosteleria")}
-            className="shrink-0 rounded px-3 py-1.5 text-xs font-semibold tracking-wide"
-            style={{ color: "#F6F8F7", backgroundColor: view === "hosteleria" ? "#1A4650" : "transparent" }}
-          >
-            🍴 Hostelería
-          </button>
-          <span className="mx-1 shrink-0 border-l" style={{ borderColor: "#2A4E56" }} />
-          {CATEGORIES.map((c) => (
-            <button
-              key={c.id}
-              onClick={() => goTo("catalog", { category: c.id })}
-              className="shrink-0 rounded px-3 py-1.5 text-xs font-semibold tracking-wide"
-              style={{ color: "#F6F8F7", backgroundColor: activeCategory === c.id ? "#1A4650" : "transparent" }}
-            >
-              {c.emoji} {c.name}
-            </button>
-          ))}
+          {[
+            { type: "flash", label: "🔥 Ofertas Flash", view: "ofertas-flash" },
+            { type: "flash", label: "⚡ Subastas", view: "subastas" },
+            { type: "cat", id: "mariscos" },
+            { type: "cat", id: "moluscos" },
+            { type: "cat", id: "crustaceos" },
+            { type: "cat", id: "pescado-azul" },
+            { type: "cat", id: "pescado-blanco" },
+            { type: "page", label: "🍴 Hostelería", view: "hosteleria" },
+            { type: "cat", id: "ahumados" },
+            { type: "page", label: "📝 Blog", view: "blog" },
+            { type: "page", label: "🍽️ Recetario", view: "recetario" },
+          ].map((item) => {
+            if (item.type === "cat") {
+              const c = CATEGORIES.find((x) => x.id === item.id);
+              if (!c) return null;
+              return (
+                <button
+                  key={c.id}
+                  onClick={() => goTo("catalog", { category: c.id })}
+                  className="shrink-0 rounded px-3 py-1.5 text-xs font-semibold tracking-wide"
+                  style={{ color: "#F6F8F7", backgroundColor: activeCategory === c.id ? "#1A4650" : "transparent" }}
+                >
+                  {c.emoji} {c.name}
+                </button>
+              );
+            }
+            const highlighted = item.type === "flash";
+            return (
+              <button
+                key={item.view}
+                onClick={() => goTo(item.view)}
+                className="shrink-0 rounded px-3 py-1.5 text-xs font-semibold tracking-wide"
+                style={{ color: highlighted ? "#E85D42" : "#F6F8F7", backgroundColor: view === item.view ? "#1A4650" : "transparent" }}
+              >
+                {item.label}
+              </button>
+            );
+          })}
         </nav>
       </header>
 
