@@ -44,13 +44,54 @@ function getDeviceId() {
  *   storage.list(prefix, shared)
  */
 /**
+ * Redimensiona y comprime una imagen en el propio navegador antes de
+ * subirla — así una foto de 5-10MB directa del móvil se queda en unos
+ * cientos de KB, sin que el vendedor tenga que hacer nada especial.
+ * Los vídeos y otros archivos que no sean imagen se dejan tal cual.
+ * Si por lo que sea la compresión no reduce el tamaño, se sube el
+ * original en vez del comprimido.
+ */
+function compressImage(file, maxWidth = 1200, quality = 0.82) {
+  if (!file.type.startsWith("image/") || file.type === "image/svg+xml") {
+    return Promise.resolve(file);
+  }
+  return new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const img = new Image();
+      img.onload = () => {
+        const scale = Math.min(1, maxWidth / img.width);
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.round(img.width * scale);
+        canvas.height = Math.round(img.height * scale);
+        const ctx = canvas.getContext("2d");
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        canvas.toBlob(
+          (blob) => {
+            if (!blob || blob.size >= file.size) resolve(file);
+            else resolve(new File([blob], file.name.replace(/\.\w+$/, ".jpg"), { type: "image/jpeg" }));
+          },
+          "image/jpeg",
+          quality
+        );
+      };
+      img.onerror = () => resolve(file);
+      img.src = e.target.result;
+    };
+    reader.onerror = () => resolve(file);
+    reader.readAsDataURL(file);
+  });
+}
+
+/**
  * Sube una foto de producto al bucket público "product-images" y devuelve
  * su URL pública, lista para guardar en product.image.
  */
 export async function uploadProductImage(file) {
-  const ext = file.name.split(".").pop();
+  const optimized = await compressImage(file);
+  const ext = optimized.name.split(".").pop();
   const path = `${crypto.randomUUID()}.${ext}`;
-  const { error } = await supabase.storage.from("product-images").upload(path, file, {
+  const { error } = await supabase.storage.from("product-images").upload(path, optimized, {
     cacheControl: "3600",
     upsert: false,
   });
@@ -62,12 +103,14 @@ export async function uploadProductImage(file) {
 /**
  * Sube un archivo de "medios del sitio" (vídeo o imagen de portada) al
  * bucket público "site-media". Solo el admin puede escribir aquí (lo
- * protege la política de seguridad, no solo el código).
+ * protege la política de seguridad, no solo el código). Los vídeos no se
+ * tocan; las imágenes (como la foto de apertura) sí se optimizan.
  */
 export async function uploadSiteMedia(file) {
-  const ext = file.name.split(".").pop();
+  const optimized = await compressImage(file, 1920, 0.85);
+  const ext = optimized.name.split(".").pop();
   const path = `${crypto.randomUUID()}.${ext}`;
-  const { error } = await supabase.storage.from("site-media").upload(path, file, {
+  const { error } = await supabase.storage.from("site-media").upload(path, optimized, {
     cacheControl: "3600",
     upsert: false,
   });
