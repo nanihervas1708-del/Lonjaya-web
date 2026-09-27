@@ -696,8 +696,8 @@ export default function App() {
   /* -------- init -------- */
   useEffect(() => {
     (async () => {
-      let v = await fetchVendors();
-      let p = await fetchProducts();
+      // Vendedores y productos se piden a la vez, no uno detrás de otro.
+      let [v, p] = await Promise.all([fetchVendors(), fetchProducts()]);
 
       // Migración única: si las tablas nuevas están vacías, se intenta traer
       // lo que hubiera en el almacenamiento antiguo (por si ya habías editado
@@ -718,27 +718,28 @@ export default function App() {
         p = oldProducts;
       }
 
-      let o = await loadShared("lonja:orders", []);
-      let c = await loadPersonal("lonja:cart", []);
-      let u = await loadPersonal("lonja:user", null);
-      let pts = await loadPersonal("lonja:points", 0);
-      let auc = [];
-      try { auc = await fetchAuctions(); } catch {}
-      let settings = await loadShared("lonja:site_settings", {});
-      let rv = [];
-      try { rv = await fetchReviews(); } catch {}
-      let posts = [];
-      try { posts = await fetchCommunityPosts(); } catch {}
-      let recs = [];
-      try { recs = await fetchRecipes(); } catch {}
-      let flash = [];
-      try { flash = await fetchFlashOffers(); } catch {}
+      // El resto de datos no dependen unos de otros, así que se piden todos
+      // a la vez en vez de uno a uno — esto es lo que antes hacía que la
+      // web tardara 10-20 segundos en cargar en vez de 1-2.
+      const [o, c, u0, pts, auc, settings, rv, posts, recs, flash, sessionUser] = await Promise.all([
+        loadShared("lonja:orders", []),
+        loadPersonal("lonja:cart", []),
+        loadPersonal("lonja:user", null),
+        loadPersonal("lonja:points", 0),
+        fetchAuctions().catch(() => []),
+        loadShared("lonja:site_settings", {}),
+        fetchReviews().catch(() => []),
+        fetchCommunityPosts().catch(() => []),
+        fetchRecipes().catch(() => []),
+        fetchFlashOffers().catch(() => []),
+        getAuthSession(),
+      ]);
+      let u = u0;
+      setAuthUser(sessionUser);
 
       // Admin y vendedor nunca se restauran desde el almacenamiento "demo":
       // dependen de la sesión real de Supabase Auth (ver useEffect de abajo).
       if (u?.role === "admin" || u?.role === "vendedor" || u?.role === "comprador") u = null;
-      const sessionUser = await getAuthSession();
-      setAuthUser(sessionUser);
 
       setProducts(p); setVendors(v); setOrders(o); setCart(c); setUser(u); setPoints(pts); setAuctions(auc); setSiteSettings(settings); setReviews(rv); setCommunityPosts(posts); setRecipes(recs); setFlashOffers(flash);
       setReady(true);
