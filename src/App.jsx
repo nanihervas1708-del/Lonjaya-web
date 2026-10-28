@@ -3267,12 +3267,16 @@ function CartView({ lines, updateQty, removeFromCart, total, goTo }) {
 /*  CHECKOUT                                                            */
 /* ------------------------------------------------------------------ */
 
+// Pago con tarjeta (Stripe): ponlo en true cuando las funciones de Stripe
+// estén desplegadas en Netlify y la cuenta de Stripe esté activada.
+const STRIPE_AVAILABLE = false;
+
 function CheckoutView({ lines, total, user, placeOrder, placeOrderPendingPayment, placeOrderForStripe, goTo, siteSettings }) {
   const [form, setForm] = useState({
     name: user?.role === "comprador" ? user?.name || "" : "",
     email: user?.role === "comprador" ? user?.email || "" : "",
     phone: user?.role === "comprador" ? user?.phone || "" : "",
-    address: "", city: "", postal: "", payment: "stripe", ageRange: "", deliveryDate: "",
+    address: "", city: "", postal: "", payment: STRIPE_AVAILABLE ? "stripe" : "paypal", ageRange: "", deliveryDate: "",
   });
   const [submitting, setSubmitting] = useState(false);
   const [payError, setPayError] = useState("");
@@ -3366,7 +3370,7 @@ function CheckoutView({ lines, total, user, placeOrder, placeOrderPendingPayment
               <div className="mb-3 grid grid-cols-3 gap-2">
                 {[
                   { id: "paypal", label: "PayPal" },
-                  { id: "stripe", label: "Tarjeta" },
+                  { id: "stripe", label: "Tarjeta", disabled: !STRIPE_AVAILABLE },
                   { id: "bizum", label: "Bizum" },
                 ].map((m) => (
                   <button
