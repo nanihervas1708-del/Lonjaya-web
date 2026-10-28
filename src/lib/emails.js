@@ -176,6 +176,33 @@ export function buildBuyerClaimsPaidEmail(order) {
   };
 }
 
+/** Aviso al admin cuando alguien intenta pagar con tarjeta: se manda ANTES de
+ * ir a Stripe (para no perder ningún intento) y otra vez si Stripe falla. */
+export function buildAdminCardAttemptEmail(order, errorMessage = "") {
+  const addr = order.shippingAddress || {};
+  const failed = !!errorMessage;
+  const lines = (order.lines || [])
+    .map((l) => `<li>${l.name} — ${l.qty} ${l.unit} × ${Number(l.price).toFixed(2)} €</li>`)
+    .join("");
+  return {
+    subject: `${failed ? "⚠️ Pago con tarjeta FALLIDO" : "🛒 Intento de pago con tarjeta"} — pedido #${order.id.slice(-6)} (${Number(order.total).toFixed(2)} €)`,
+    html: `
+      <div style="font-family:sans-serif;max-width:520px;margin:auto">
+        <h2 style="color:#0E3A45">${failed ? "El pago con tarjeta no se pudo iniciar" : "Un cliente ha ido a pagar con tarjeta"}</h2>
+        <p>Pedido <strong>#${order.id.slice(-6)}</strong> · <strong>${Number(order.total).toFixed(2)} €</strong> · estado: <strong>pendiente de pago</strong>.</p>
+        ${failed ? `<p style="color:#B91C1C"><strong>Error de la pasarela:</strong> ${errorMessage}</p><p>Contacta con el cliente para ofrecerle otra forma de pago.</p>` : "<p>Todavía NO está pagado. Si el pago se completa, recibirás el aviso normal de pedido confirmado.</p>"}
+        <ul>${lines}</ul>
+        <div style="background:#F6F8F7;border-radius:8px;padding:14px;margin:16px 0">
+          <p style="margin:2px 0"><strong>Cliente:</strong> ${addr.name || "—"}</p>
+          <p style="margin:2px 0"><strong>Email:</strong> ${addr.email || "—"}</p>
+          <p style="margin:2px 0"><strong>Teléfono:</strong> ${addr.phone || "—"}</p>
+          <p style="margin:2px 0"><strong>Dirección:</strong> ${addr.address || ""}, ${addr.city || ""} (${addr.postal || ""})</p>
+        </div>
+        ${BRAND_FOOTER}
+      </div>`,
+  };
+}
+
 /** Email para el admin cuando alguien se da de alta como vendedor nuevo. */
 export function buildAdminNewVendorEmail(vendor) {
   return {

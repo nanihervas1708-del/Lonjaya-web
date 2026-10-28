@@ -9,7 +9,7 @@ import { fetchReviews, submitReview, vendorAverageRating } from "./lib/reviews";
 import { fetchCommunityPosts, createCommunityPost, hideCommunityPost, fetchRecipes, createRecipe, hideRecipe, uploadUserMedia } from "./lib/community";
 import { createProductAlert, registerReferral, completeReferralIfAny, logCheckoutAttempt, markCheckoutConverted, claimPendingBonusPoints, subscribeNewsletter, awardBonusPoints } from "./lib/alerts";
 import { isPushSupported, subscribeToPush, unsubscribeFromPush, sendPushNotification } from "./lib/push";
-import { sendEmail, sendAdminNotification, buildOrderConfirmationEmail, buildVendorNewOrderEmail, buildAdminNewVendorEmail, buildPendingPaymentEmail, buildAdminOrderEmail, buildBuyerClaimsPaidEmail } from "./lib/emails";
+import { sendEmail, sendAdminNotification, buildOrderConfirmationEmail, buildVendorNewOrderEmail, buildAdminNewVendorEmail, buildPendingPaymentEmail, buildAdminOrderEmail, buildBuyerClaimsPaidEmail, buildAdminCardAttemptEmail } from "./lib/emails";
 import { marked } from "marked";
 import { LEGAL_DOCS } from "./lib/legalContent";
 import {
@@ -1338,18 +1338,28 @@ export default function App() {
     setOrders(next);
     setLastOrder(order);
 
-    const res = await fetch("/.netlify/functions/stripe-create-checkout", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        orderId: order.id,
-        amount: order.total,
-        email: shippingAddress.email,
-        description: `Pedido LonjaYa #${order.id.slice(-6)}`,
-      }),
-    });
-    const data = await res.json();
-    if (!res.ok || !data.url) throw new Error(data.error || "No se pudo iniciar el pago con tarjeta");
+    // Aviso inmediato al admin: aunque el cliente abandone Stripe o la
+    // pasarela falle, el intento queda notificado con sus datos de contacto.
+    sendAdminNotification(buildAdminCardAttemptEmail(order));
+
+    let data;
+    try {
+      const res = await fetch("/.netlify/functions/stripe-create-checkout", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          orderId: order.id,
+          amount: order.total,
+          email: shippingAddress.email,
+          description: `Pedido LonjaYa #${order.id.slice(-6)}`,
+        }),
+      });
+      data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.url) throw new Error(data.error || "No se pudo iniciar el pago con tarjeta");
+    } catch (err) {
+      sendAdminNotification(buildAdminCardAttemptEmail(order, err.message || String(err)));
+      throw err;
+    }
 
     // El carrito se vacía aquí porque a partir de este punto el pedido ya
     // está reservado; si el pago se cancela en Stripe, el pedido se queda
