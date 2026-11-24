@@ -10,6 +10,7 @@ import { fetchCommunityPosts, createCommunityPost, hideCommunityPost, fetchRecip
 import { createProductAlert, registerReferral, completeReferralIfAny, logCheckoutAttempt, markCheckoutConverted, claimPendingBonusPoints, subscribeNewsletter, awardBonusPoints } from "./lib/alerts";
 import { isPushSupported, subscribeToPush, unsubscribeFromPush, sendPushNotification } from "./lib/push";
 import { sendEmail, sendAdminNotification, buildOrderConfirmationEmail, buildVendorNewOrderEmail, buildAdminNewVendorEmail, buildPendingPaymentEmail, buildAdminOrderEmail, buildBuyerClaimsPaidEmail, buildAdminCardAttemptEmail } from "./lib/emails";
+import { summarizePoints, fetchAllBonusRows, fetchMyBonusTotal } from "./lib/points";
 import { marked } from "marked";
 import { LEGAL_DOCS } from "./lib/legalContent";
 import {
@@ -44,6 +45,8 @@ const LOYALTY_CONFIG = {
   pointsPerEuro: 10,     // puntos ganados por cada € gastado
   rewardThreshold: 500,  // puntos necesarios para el siguiente descuento
   rewardValue: 5,        // € de descuento que se consiguen cada "rewardThreshold" puntos
+  maxRedeemPerOrder: 1000, // máximo de puntos canjeables en una sola compra
+  minPurchaseToRedeem: 100, // solo se pueden canjear puntos en compras superiores a este importe (€)
 };
 
 // Puntos de regalo por "participar" (no por comprar): dejar una reseña,
@@ -500,7 +503,7 @@ function WhatsAppFloatingButton({ phone }) {
       href={`https://wa.me/${phone}?text=${message}`}
       target="_blank"
       rel="noopener noreferrer"
-      className="fixed bottom-5 right-5 z-50 flex items-center gap-2 rounded-full px-4 py-3 text-sm font-semibold text-white shadow-xl transition-transform hover:scale-105"
+      className="fixed bottom-20 right-5 z-50 flex items-center gap-2 rounded-full px-4 py-3 text-sm font-semibold text-white shadow-xl lg:bottom-5 transition-transform hover:scale-105"
       style={{ backgroundColor: "#25D366" }}
       aria-label="Escríbenos por WhatsApp"
     >
@@ -1058,6 +1061,7 @@ export default function App() {
     try {
       await deleteProductRow(id);
       setProducts((prev) => prev.filter((p) => p.id !== id));
+      showToast("Producto eliminado");
     } catch (err) {
       showToast("No se pudo borrar el producto");
     }
@@ -1168,9 +1172,75 @@ export default function App() {
       .map((v) => v.name);
   };
 
-  const placeOrder = async (shippingAddress, payment) => {
-    const shippingCost = shippingCostForWeight(cartWeightKg(cartLines));
+  /* Envío con el mismo criterio que ve el cliente en la cesta y el pago
+   * (envío gratis a partir del umbral configurado en el panel). */
+  const shippingFor = (total, lines) =>
+    total >= (siteSettings?.freeShippingThreshold ?? 100) ? 0 : shippingCostForWeight(cartWeightKg(lines));
+
+  /* El descuento de bienvenida es solo para la primera compra de cada cliente.
+   * Se considera el mismo cliente si coincide el email, el teléfono o la
+   * dirección de entrega (calle + código postal) con un pedido anterior.
+   * Cuentan como compra anterior los pedidos confirmados y los reservados por
+   * Bizum/transferencia; un pago con tarjeta o PayPal abandonado (pendiente
+   * de pago) no la gasta. */
+  const isFirstPurchase = (who) => {
+    const norm = (t) => (t || "").toString().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]/g, "");
+    const email = (who?.email || "").trim().toLowerCase();
+    const phone = (who?.phone || "").replace(/\D/g, "").slice(-9);
+    const street = norm(who?.address);
+    const postal = (who?.postal || "").replace(/\D/g, "");
+    const hasPhone = phone.length >= 9;
+    const hasAddress = street.length >= 6 && postal.length === 5;
+    return !orders.some((o) => {
+      if (o.status === "cancelado") return false;
+      if (o.status === "pendiente_pago") {
+        const prov = o.payment?.provider;
+        if (prov !== "bizum" && prov !== "transferencia") return false;
+      }
+      const a = o.shippingAddress || {};
+      if (email && (a.email || "").trim().toLowerCase() === email) return true;
+      if (hasPhone && (a.phone || "").replace(/\D/g, "").slice(-9) === phone) return true;
+      if (hasAddress && norm(a.address) === street && (a.postal || "").replace(/\D/g, "") === postal) return true;
+      return false;
+    });
+  };
+
+  /** Puntos que se pueden canjear de verdad en esta compra: solo clientes con
+   * cuenta, solo si la compra supera el mínimo, en bloques de rewardThreshold,
+   * sin pasar del máximo por compra ni del saldo del cliente. */
+  const [myBonusTotal, setMyBonusTotal] = useState(0);
+  useEffect(() => {
+    if (user?.role === "comprador" && user?.email) fetchMyBonusTotal(user.email).then(setMyBonusTotal).catch(() => {});
+    else setMyBonusTotal(0);
+  }, [user?.email, user?.role]);
+  /** Saldo que el cliente puede canjear de verdad: el MENOR entre lo que dice
+   * su dispositivo y lo que cuadra con sus pedidos (el dispositivo se puede manipular). */
+  const redeemablePoints = () => {
+    const email = (user?.email || "").trim().toLowerCase();
+    const row = summarizePoints(orders).get(email);
+    const verified = Math.max(0, (row ? row.earned - row.used : 0) + myBonusTotal);
+    return Math.min(points, verified);
+  };
+  const sanitizePointsToRedeem = (requested, subtotal) => {
+    if (user?.role !== "comprador" || !(subtotal > LOYALTY_CONFIG.minPurchaseToRedeem)) return 0;
+    const block = LOYALTY_CONFIG.rewardThreshold;
+    const byBalance = Math.floor(redeemablePoints() / block) * block;
+    const wanted = Math.floor((Number(requested) || 0) / block) * block;
+    return Math.max(0, Math.min(wanted, byBalance, LOYALTY_CONFIG.maxRedeemPerOrder));
+  };
+  const pointsToEuros = (pts) => (pts / LOYALTY_CONFIG.rewardThreshold) * LOYALTY_CONFIG.rewardValue;
+  const spendPoints = async (pts) => {
+    if (!(pts > 0)) return;
+    const next = points - pts;
+    setPoints(next);
+    await savePersonal("lonja:points", next);
+  };
+
+  const placeOrder = async (shippingAddress, payment, discountAmount = 0, pointsRequested = 0) => {
+    const shippingCost = shippingFor(cartTotal, cartLines);
     const earnedPoints = Math.round(cartTotal * LOYALTY_CONFIG.pointsPerEuro);
+    const pointsUsed = sanitizePointsToRedeem(pointsRequested, cartTotal);
+    const pointsDiscount = pointsToEuros(pointsUsed);
     const order = {
       id: "o" + Date.now(),
       user: user?.name || "Invitado",
@@ -1185,7 +1255,10 @@ export default function App() {
       }),
       subtotal: cartTotal,
       shippingCost,
-      total: cartTotal + shippingCost,
+      discountAmount,
+      pointsUsed,
+      pointsDiscount,
+      total: Math.max(0, cartTotal + shippingCost - discountAmount - pointsDiscount),
       shippingAddress,
       payment: payment || null, // { provider: "paypal", paypalOrderId, payerEmail }
       status: "confirmado",
@@ -1204,7 +1277,7 @@ export default function App() {
     setOrders(next);
     setCart([]);
     await savePersonal("lonja:cart", []);
-    const nextPoints = points + earnedPoints;
+    const nextPoints = points - pointsUsed + earnedPoints;
     setPoints(nextPoints);
     await savePersonal("lonja:points", nextPoints);
     setLastOrder(order);
@@ -1252,9 +1325,11 @@ export default function App() {
   };
 
   /* -------- pago por transferencia bancaria o Bizum (confirmación manual) -------- */
-  const placeOrderPendingPayment = async (shippingAddress, method, discountAmount = 0) => {
-    const shippingCost = shippingCostForWeight(cartWeightKg(cartLines));
+  const placeOrderPendingPayment = async (shippingAddress, method, discountAmount = 0, pointsRequested = 0) => {
+    const shippingCost = shippingFor(cartTotal, cartLines);
     const earnedPoints = Math.round(cartTotal * LOYALTY_CONFIG.pointsPerEuro);
+    const pointsUsed = sanitizePointsToRedeem(pointsRequested, cartTotal);
+    const pointsDiscount = pointsToEuros(pointsUsed);
     const order = {
       id: "o" + Date.now(),
       user: user?.name || "Invitado",
@@ -1270,7 +1345,9 @@ export default function App() {
       subtotal: cartTotal,
       shippingCost,
       discountAmount,
-      total: Math.max(0, cartTotal + shippingCost - discountAmount),
+      pointsUsed,
+      pointsDiscount,
+      total: Math.max(0, cartTotal + shippingCost - discountAmount - pointsDiscount),
       shippingAddress,
       payment: { provider: method }, // "transferencia" | "bizum"
       status: "pendiente_pago",
@@ -1285,6 +1362,7 @@ export default function App() {
     setOrders(next);
     setCart([]);
     await savePersonal("lonja:cart", []);
+    await spendPoints(pointsUsed);
     setLastOrder(order);
 
     sendEmail({
@@ -1305,9 +1383,11 @@ export default function App() {
    * email de "transfiere tú a mano" — en vez de eso, el navegador redirige
    * a la pasarela de Stripe, y es el webhook del servidor (no el navegador)
    * quien confirma el pedido de verdad cuando el pago se completa. */
-  const placeOrderForStripe = async (shippingAddress, discountAmount = 0) => {
-    const shippingCost = shippingCostForWeight(cartWeightKg(cartLines));
+  const placeOrderForStripe = async (shippingAddress, discountAmount = 0, pointsRequested = 0) => {
+    const shippingCost = shippingFor(cartTotal, cartLines);
     const earnedPoints = Math.round(cartTotal * LOYALTY_CONFIG.pointsPerEuro);
+    const pointsUsed = sanitizePointsToRedeem(pointsRequested, cartTotal);
+    const pointsDiscount = pointsToEuros(pointsUsed);
     const order = {
       id: "o" + Date.now(),
       user: user?.name || "Invitado",
@@ -1323,7 +1403,9 @@ export default function App() {
       subtotal: cartTotal,
       shippingCost,
       discountAmount,
-      total: Math.max(0, cartTotal + shippingCost - discountAmount),
+      pointsUsed,
+      pointsDiscount,
+      total: Math.max(0, cartTotal + shippingCost - discountAmount - pointsDiscount),
       shippingAddress,
       payment: { provider: "stripe" },
       status: "pendiente_pago",
@@ -1336,6 +1418,7 @@ export default function App() {
       throw new Error("No se pudo guardar el pedido antes de ir a Stripe");
     }
     setOrders(next);
+    await spendPoints(pointsUsed);
     setLastOrder(order);
 
     // Aviso inmediato al admin: aunque el cliente abandone Stripe o la
@@ -1855,6 +1938,7 @@ export default function App() {
         )}
         {view === "product" && activeProduct && (
           <ProductView
+            siteSettings={siteSettings}
             product={activeProduct}
             vendor={vendorOf(activeProduct.vendorId)}
             allProducts={storefrontProducts}
@@ -1865,10 +1949,10 @@ export default function App() {
           />
         )}
         {view === "cart" && (
-          <CartView lines={cartLines} updateQty={updateQty} removeFromCart={removeFromCart} total={cartTotal} goTo={goTo} />
+          <CartView lines={cartLines} updateQty={updateQty} removeFromCart={removeFromCart} total={cartTotal} goTo={goTo} siteSettings={siteSettings} />
         )}
         {view === "checkout" && (
-          <CheckoutView lines={cartLines} total={cartTotal} user={user} placeOrder={placeOrder} placeOrderPendingPayment={placeOrderPendingPayment} placeOrderForStripe={placeOrderForStripe} goTo={goTo} siteSettings={siteSettings} />
+          <CheckoutView lines={cartLines} total={cartTotal} user={user} placeOrder={placeOrder} placeOrderPendingPayment={placeOrderPendingPayment} placeOrderForStripe={placeOrderForStripe} goTo={goTo} siteSettings={siteSettings} isFirstPurchase={isFirstPurchase} points={redeemablePoints()} />
         )}
         {view === "ofertas-flash" && (
           <FlashOffersView flashOffers={flashOffers} products={products} vendors={vendors} goTo={goTo} addToCart={addToCart} />
@@ -1919,6 +2003,7 @@ export default function App() {
         )}
         {view === "admin" && user?.role === "admin" && (
           <AdminView
+            deleteProduct={deleteProduct}
             vendors={vendors}
             products={products}
             orders={orders}
@@ -2536,7 +2621,7 @@ function StockAlertBox({ product, user }) {
   );
 }
 
-function ProductView({ product, vendor, allProducts, vendors, addToCart, goTo, user }) {
+function ProductView({ product, vendor, allProducts, vendors, addToCart, goTo, user, siteSettings }) {
   const [qty, setQty] = useState(1);
   const [variantLabel, setVariantLabel] = useState(product.variants?.[0]?.label || null);
   const { rating, count } = productReviews(product.id);
@@ -2630,6 +2715,13 @@ function ProductView({ product, vendor, allProducts, vendors, addToCart, goTo, u
             <Snowflake size={13} /> {LOGISTICS_INFO.shortBadge} · {LOGISTICS_INFO.partnerName}
           </div>
 
+          <div className="mt-4 grid grid-cols-1 gap-2 rounded-lg border p-3 text-xs sm:grid-cols-3" style={{ borderColor: "#2F6B5E33", backgroundColor: "#2F6B5E0D", color: "#2F6B5E" }}>
+            <span className="flex items-start gap-1.5 font-medium"><Snowflake size={14} className="mt-0.5 shrink-0" /> {shippingSummary(siteSettings)}</span>
+            <span className="flex items-start gap-1.5 font-medium"><ShieldCheck size={14} className="mt-0.5 shrink-0" /> Pago seguro con PayPal o Bizum, sin registrarte</span>
+            <span className="flex items-start gap-1.5 font-medium"><Package size={14} className="mt-0.5 shrink-0" /> Si llega dañado, gestionamos la devolución</span>
+          </div>
+          <div className="mt-3"><WelcomeDiscountBanner siteSettings={siteSettings} compact /></div>
+
           <div className="mt-6 flex items-center gap-3">
             <div className="flex items-center rounded-md border" style={{ borderColor: "#D9CBB3" }}>
               <button onClick={() => setQty((q) => Math.max(1, q - 1))} className="p-2"><Minus size={14} /></button>
@@ -2645,6 +2737,22 @@ function ProductView({ product, vendor, allProducts, vendors, addToCart, goTo, u
               {product.stock <= 0 ? "Agotado" : <><ShoppingCart size={16} /> Añadir a la cesta</>}
             </button>
           </div>
+
+          {product.stock > 0 && (
+            <div className="fixed inset-x-0 bottom-0 z-40 flex items-center gap-3 border-t bg-white px-4 py-2.5 shadow-[0_-4px_12px_rgba(0,0,0,0.08)] lg:hidden" style={{ borderColor: "#E4D9C4" }}>
+              <div className="leading-tight">
+                <p className="text-[11px]" style={{ color: "#5C6B6E" }}>{product.name}</p>
+                <p className="text-base font-bold" style={{ color: "#E85D42", fontFamily: "'IBM Plex Mono', monospace" }}>{eur(displayPrice)}<span className="text-[11px] font-normal" style={{ color: "#5C6B6E" }}>/{product.unit}</span></p>
+              </div>
+              <button
+                onClick={() => addToCart(product.id, qty, variantLabel)}
+                className="ml-auto flex items-center gap-2 rounded-md px-4 py-2.5 text-sm font-semibold text-white"
+                style={{ backgroundColor: "#0E3A45" }}
+              >
+                <ShoppingCart size={16} /> Añadir
+              </button>
+            </div>
+          )}
 
           {product.stock <= 0 && <StockAlertBox product={product} user={user} />}
 
@@ -2685,6 +2793,7 @@ function ProductView({ product, vendor, allProducts, vendors, addToCart, goTo, u
           )}
         </div>
       </div>
+      <div className="h-16 lg:hidden" />
     </div>
   );
 }
@@ -3206,9 +3315,37 @@ function AuctionCheckoutView({ auction, product, vendor, user, goTo, finalizeAuc
 
 /* ------------------------------------------------------------------ */
 
-function CartView({ lines, updateQty, removeFromCart, total, goTo }) {
+/* Texto de envío coherente en ficha, cesta y checkout (mismo umbral de envío gratis). */
+function shippingSummary(siteSettings) {
+  const threshold = siteSettings?.freeShippingThreshold ?? 100;
+  return `Envío en frío desde ${eur(SHIPPING_BASE_PRICE)} · gratis a partir de ${eur(threshold)}`;
+}
+
+/* Código de bienvenida bien visible (usa los mismos ajustes que el checkout). */
+function WelcomeDiscountBanner({ siteSettings, compact = false }) {
+  const active = siteSettings?.discountActive !== false;
+  if (!active) return null;
+  const code = siteSettings?.discountCode || "BIENVENIDA10";
+  const pct = siteSettings?.discountPercent ?? 10;
+  return (
+    <div
+      className={`flex items-center gap-2 rounded-lg border ${compact ? "px-3 py-2" : "p-3"}`}
+      style={{ borderColor: "#E85D4233", backgroundColor: "#E85D420D" }}
+    >
+      <span className="text-base">🎁</span>
+      <p className="text-xs" style={{ color: "#16242A" }}>
+        <strong>{pct}% de descuento en tu primera compra</strong> con el código{" "}
+        <span className="rounded px-1.5 py-0.5 font-bold" style={{ backgroundColor: "#E85D4222", color: "#B8402A", fontFamily: "'IBM Plex Mono', monospace" }}>{code}</span>
+      </p>
+    </div>
+  );
+}
+
+function CartView({ lines, updateQty, removeFromCart, total, goTo, siteSettings }) {
   const weightKg = cartWeightKg(lines);
-  const shippingCost = shippingCostForWeight(weightKg);
+  const freeShippingThreshold = siteSettings?.freeShippingThreshold ?? 100;
+  const freeShipping = total >= freeShippingThreshold;
+  const shippingCost = freeShipping ? 0 : shippingCostForWeight(weightKg);
 
   if (lines.length === 0) {
     return (
@@ -3251,10 +3388,22 @@ function CartView({ lines, updateQty, removeFromCart, total, goTo }) {
         <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide" style={{ color: "#5C6B6E" }}>Resumen</h2>
         <div className="flex justify-between text-sm"><span>Subtotal</span><span>{eur(total)}</span></div>
         <div className="flex justify-between text-xs" style={{ color: "#5C6B6E" }}><span>Peso estimado</span><span>{weightKg.toFixed(1)} kg</span></div>
-        <div className="flex justify-between text-sm"><span>Envío en frío</span><span>{eur(shippingCost)}</span></div>
+        <div className="flex justify-between text-sm"><span>Envío en frío</span><span>{freeShipping ? <span style={{ color: "#2F6B5E", fontWeight: 600 }}>Gratis 🎉</span> : eur(shippingCost)}</span></div>
+        {!freeShipping && (
+          <div className="mt-2">
+            <div className="h-1.5 overflow-hidden rounded-full" style={{ backgroundColor: "#E4D9C4" }}>
+              <div className="h-full rounded-full" style={{ width: `${Math.min(100, Math.round((total / freeShippingThreshold) * 100))}%`, backgroundColor: "#2F6B5E" }} />
+            </div>
+            <p className="mt-1 text-[11px]" style={{ color: "#5C6B6E" }}>Te faltan {eur(freeShippingThreshold - total)} para el envío gratis.</p>
+          </div>
+        )}
         <div className="mt-3 flex justify-between border-t pt-3 text-base font-bold" style={{ borderColor: "#E4D9C4" }}>
           <span>Total</span><span style={{ color: "#E85D42" }}>{eur(total + shippingCost)}</span>
         </div>
+        <div className="mt-3"><WelcomeDiscountBanner siteSettings={siteSettings} compact /></div>
+        <p className="mt-2 flex items-center gap-1 text-[11px]" style={{ color: "#5C6B6E" }}>
+          <ShieldCheck size={12} /> Compra sin registro · pago seguro con PayPal o Bizum
+        </p>
         <button onClick={() => goTo("checkout")} className="mt-4 w-full rounded-md py-2.5 text-sm font-semibold text-white" style={{ backgroundColor: "#E85D42" }}>
           Tramitar pedido
         </button>
@@ -3271,7 +3420,7 @@ function CartView({ lines, updateQty, removeFromCart, total, goTo }) {
 // estén desplegadas en Netlify y la cuenta de Stripe esté activada.
 const STRIPE_AVAILABLE = false;
 
-function CheckoutView({ lines, total, user, placeOrder, placeOrderPendingPayment, placeOrderForStripe, goTo, siteSettings }) {
+function CheckoutView({ lines, total, user, placeOrder, placeOrderPendingPayment, placeOrderForStripe, goTo, siteSettings, isFirstPurchase, points = 0 }) {
   const [form, setForm] = useState({
     name: user?.role === "comprador" ? user?.name || "" : "",
     email: user?.role === "comprador" ? user?.email || "" : "",
@@ -3290,13 +3439,29 @@ function CheckoutView({ lines, total, user, placeOrder, placeOrderPendingPayment
   const validCode = siteSettings?.discountCode || "BIENVENIDA10";
   const discountPct = siteSettings?.discountPercent ?? 10;
   const discountActive = siteSettings?.discountActive !== false;
-  const discountAmount = discountApplied ? Math.round(total * (discountPct / 100) * 100) / 100 : 0;
-  const grandTotal = total + shipping - discountAmount;
+  const eligibleForDiscount = isFirstPurchase(form);
+  const discountAmount = discountApplied && eligibleForDiscount ? Math.round(total * (discountPct / 100) * 100) / 100 : 0;
+  // Canje de puntos: solo con cuenta, compra > minPurchaseToRedeem, bloques de rewardThreshold, tope por compra.
+  const [pointsToUse, setPointsToUse] = useState(0);
+  const redeemBlock = LOYALTY_CONFIG.rewardThreshold;
+  const isBuyer = user?.role === "comprador";
+  const purchaseBigEnough = total > LOYALTY_CONFIG.minPurchaseToRedeem;
+  const maxRedeemable = isBuyer && purchaseBigEnough
+    ? Math.min(LOYALTY_CONFIG.maxRedeemPerOrder, Math.floor(points / redeemBlock) * redeemBlock)
+    : 0;
+  const effectivePoints = Math.min(pointsToUse, maxRedeemable);
+  const pointsDiscount = (effectivePoints / redeemBlock) * LOYALTY_CONFIG.rewardValue;
+  const redeemOptions = [];
+  for (let p = redeemBlock; p <= maxRedeemable; p += redeemBlock) redeemOptions.push(p);
+  const grandTotal = Math.max(0, total + shipping - discountAmount - pointsDiscount);
 
   const applyDiscount = () => {
     if (discountActive && discountInput.trim().toUpperCase() === validCode.toUpperCase()) {
       setDiscountApplied(true);
       setLocalNotice("");
+      if (!eligibleForDiscount) {
+        setLocalNotice("Este código es solo para la primera compra de cada cliente");
+      }
     } else {
       setDiscountApplied(false);
       setLocalNotice("Código no válido");
@@ -3361,11 +3526,7 @@ function CheckoutView({ lines, total, user, placeOrder, placeOrderPendingPayment
           </div>
 
           <h2 className="mb-3 mt-5 text-sm font-semibold">Pago</h2>
-          {!canSubmit ? (
-            <p className="rounded-md border border-dashed p-3 text-xs" style={{ borderColor: "#D9CBB3", color: "#5C6B6E" }}>
-              Rellena la dirección de entrega para ver las opciones de pago.
-            </p>
-          ) : (
+          {
             <>
               <div className="mb-3 grid grid-cols-3 gap-2">
                 {[
@@ -3390,17 +3551,23 @@ function CheckoutView({ lines, total, user, placeOrder, placeOrderPendingPayment
                 ))}
               </div>
 
-              {form.payment === "paypal" && (
+              {!canSubmit && (
+                <p className="rounded-md border border-dashed p-3 text-xs" style={{ borderColor: "#D9CBB3", color: "#5C6B6E" }}>
+                  Completa tus datos de entrega (nombre, teléfono, email, dirección, ciudad y código postal) para activar el botón de pago.
+                </p>
+              )}
+
+              {canSubmit && form.payment === "paypal" && (
                 <PayPalCheckoutButton
                   amount={grandTotal}
                   submitting={submitting}
                   setSubmitting={setSubmitting}
                   onError={setPayError}
-                  onSuccess={async (payment) => { await placeOrder(form, payment); }}
+                  onSuccess={async (payment) => { await placeOrder(form, payment, discountAmount, effectivePoints); }}
                 />
               )}
 
-              {form.payment === "stripe" && (
+              {canSubmit && form.payment === "stripe" && (
                 <StripeCheckoutButton
                   amount={grandTotal}
                   shippingAddress={form}
@@ -3408,11 +3575,12 @@ function CheckoutView({ lines, total, user, placeOrder, placeOrderPendingPayment
                   setSubmitting={setSubmitting}
                   onError={setPayError}
                   discountAmount={discountAmount}
+                  pointsToUse={effectivePoints}
                   placeOrderForStripe={placeOrderForStripe}
                 />
               )}
 
-              {(form.payment === "transferencia" || form.payment === "bizum") && (
+              {canSubmit && (form.payment === "transferencia" || form.payment === "bizum") && (
                 <div className="rounded-md border p-3" style={{ borderColor: "#D9CBB3" }}>
                   <p className="mb-2 text-xs" style={{ color: "#5C6B6E" }}>
                     Confirma el pedido y te enviaremos por email {form.payment === "bizum" ? "el número de Bizum" : "el IBAN"} y el importe exacto para completar el pago.
@@ -3424,7 +3592,7 @@ function CheckoutView({ lines, total, user, placeOrder, placeOrderPendingPayment
                       setSubmitting(true);
                       setPayError("");
                       try {
-                        await placeOrderPendingPayment(form, form.payment, discountAmount);
+                        await placeOrderPendingPayment(form, form.payment, discountAmount, effectivePoints);
                       } catch (err) {
                         setPayError("No se pudo reservar el pedido. Inténtalo de nuevo.");
                       } finally {
@@ -3443,7 +3611,7 @@ function CheckoutView({ lines, total, user, placeOrder, placeOrderPendingPayment
                 </div>
               )}
             </>
-          )}
+          }
           {payError && <p className="mt-2 text-xs font-medium" style={{ color: "#B04A2F" }}>{payError}</p>}
           <p className="mt-2 flex items-center gap-1 text-[11px]" style={{ color: "#5C6B6E" }}>
             <ShieldCheck size={12} /> Pago seguro procesado por PayPal. LonjaYa nunca ve ni guarda los datos de tu tarjeta o cuenta.
@@ -3482,14 +3650,66 @@ function CheckoutView({ lines, total, user, placeOrder, placeOrderPendingPayment
           </p>
         )}
 
+        <div className="mt-2 border-t pt-2" style={{ borderColor: "#E4D9C4" }}>
+          {!isBuyer ? (
+            <p className="text-[11px]" style={{ color: "#5C6B6E" }}>
+              🎣 Inicia sesión para canjear tus puntos LonjaYa (cada {redeemBlock} puntos = {eur(LOYALTY_CONFIG.rewardValue)}).
+            </p>
+          ) : points < redeemBlock ? (
+            <p className="text-[11px]" style={{ color: "#5C6B6E" }}>
+              🎣 Tienes {points} puntos. Con {redeemBlock} puntos podrás canjear {eur(LOYALTY_CONFIG.rewardValue)} en compras de más de {eur(LOYALTY_CONFIG.minPurchaseToRedeem)}.
+            </p>
+          ) : !purchaseBigEnough ? (
+            <p className="text-[11px]" style={{ color: "#5C6B6E" }}>
+              🎣 Tienes {points} puntos. Podrás canjearlos en compras de más de {eur(LOYALTY_CONFIG.minPurchaseToRedeem)} (hasta {LOYALTY_CONFIG.maxRedeemPerOrder} puntos = {eur((LOYALTY_CONFIG.maxRedeemPerOrder / redeemBlock) * LOYALTY_CONFIG.rewardValue)} por compra).
+            </p>
+          ) : (
+            <div>
+              <p className="text-xs font-semibold" style={{ color: "#8A6A00" }}>🎣 Canjear puntos LonjaYa (tienes {points})</p>
+              <div className="mt-1.5 flex flex-wrap gap-1.5">
+                <button type="button" onClick={() => setPointsToUse(0)} className="rounded-md border px-2.5 py-1 text-[11px] font-semibold"
+                  style={{ borderColor: "#B08900", backgroundColor: effectivePoints === 0 ? "#B08900" : "transparent", color: effectivePoints === 0 ? "#fff" : "#8A6A00" }}>
+                  No canjear
+                </button>
+                {redeemOptions.map((p) => (
+                  <button key={p} type="button" onClick={() => setPointsToUse(p)} className="rounded-md border px-2.5 py-1 text-[11px] font-semibold"
+                    style={{ borderColor: "#B08900", backgroundColor: effectivePoints === p ? "#B08900" : "transparent", color: effectivePoints === p ? "#fff" : "#8A6A00" }}>
+                    {p} pts = -{eur((p / redeemBlock) * LOYALTY_CONFIG.rewardValue)}
+                  </button>
+                ))}
+              </div>
+              <p className="mt-1 text-[10px]" style={{ color: "#5C6B6E" }}>Máximo {LOYALTY_CONFIG.maxRedeemPerOrder} puntos por compra.</p>
+              {pointsDiscount > 0 && (
+                <p className="mt-1 flex items-center justify-between text-xs font-semibold" style={{ color: "#2F6B5E" }}>
+                  <span>Puntos canjeados ({effectivePoints})</span><span>-{eur(pointsDiscount)}</span>
+                </p>
+              )}
+            </div>
+          )}
+        </div>
+
         {discountActive && (
           <div className="mt-2 border-t pt-2" style={{ borderColor: "#E4D9C4" }}>
-            {discountApplied ? (
+            {discountApplied && !eligibleForDiscount ? (
+              <p className="text-xs font-medium" style={{ color: "#B04A2F" }}>
+                El código {validCode} es solo para la primera compra de cada cliente y ya hay una compra anterior con este email, teléfono o dirección.
+              </p>
+            ) : discountApplied ? (
               <p className="flex items-center justify-between text-xs font-semibold" style={{ color: "#2F6B5E" }}>
                 <span>Código {validCode} aplicado (-{discountPct}%)</span>
                 <span>-{eur(discountAmount)}</span>
               </p>
             ) : (
+              <div className="flex flex-col gap-1.5">
+                <button
+                  type="button"
+                  disabled={!eligibleForDiscount}
+                  onClick={() => { setDiscountInput(validCode); setDiscountApplied(true); setLocalNotice(""); }}
+                  className="rounded-md border px-3 py-1.5 text-left text-xs font-semibold"
+                  style={{ borderColor: "#E85D42", color: "#B8402A", backgroundColor: "#E85D420D", opacity: eligibleForDiscount ? 1 : 0.5 }}
+                >
+                  🎁 {eligibleForDiscount ? `Usar código ${validCode} (-${discountPct}%) en tu primera compra` : "Descuento de primera compra no disponible (ya hay una compra con estos datos)"}
+                </button>
               <div className="flex gap-2">
                 <input
                   placeholder="Código de descuento" value={discountInput}
@@ -3500,6 +3720,7 @@ function CheckoutView({ lines, total, user, placeOrder, placeOrderPendingPayment
                 <button onClick={applyDiscount} className="rounded-md border px-3 py-1.5 text-xs font-semibold" style={{ borderColor: "#0E3A45", color: "#0E3A45" }}>
                   Aplicar
                 </button>
+              </div>
               </div>
             )}
             {localNotice && <p className="mt-1 text-[11px] font-medium" style={{ color: "#B04A2F" }}>{localNotice}</p>}
@@ -3539,12 +3760,12 @@ function loadPayPalSdk() {
   return paypalSdkPromise;
 }
 
-function StripeCheckoutButton({ amount, shippingAddress, submitting, setSubmitting, onError, discountAmount, placeOrderForStripe }) {
+function StripeCheckoutButton({ amount, shippingAddress, submitting, setSubmitting, onError, discountAmount, pointsToUse = 0, placeOrderForStripe }) {
   const pay = async () => {
     setSubmitting(true);
     onError("");
     try {
-      await placeOrderForStripe(shippingAddress, discountAmount);
+      await placeOrderForStripe(shippingAddress, discountAmount, pointsToUse);
       // A partir de aquí el navegador ya está redirigiendo a Stripe.
     } catch (err) {
       onError(err.message || "No se pudo iniciar el pago con tarjeta.");
@@ -5720,7 +5941,145 @@ function HeroMediaAdminSection({ siteSettings, updateSiteSettings }) {
   );
 }
 
-function AdminView({ vendors, products, orders, auctions, createAuction, cancelAuction, setVendorStatus, setVendorCommission, addVendor, siteSettings, updateSiteSettings, upsertProduct, flashOffers, addFlashOffer, removeFlashOffer, confirmPendingOrderPayment }) {
+/* ------------------------------------------------------------------ */
+/*  ADMIN: contador de puntos de clientes                               */
+/* ------------------------------------------------------------------ */
+
+function AdminPointsSection({ orders }) {
+  const [bonusRows, setBonusRows] = useState([]);
+  const [q, setQ] = useState("");
+  const [open, setOpen] = useState(false);
+  useEffect(() => { fetchAllBonusRows().then(setBonusRows).catch(() => {}); }, [orders.length]);
+  const rows = useMemo(() => {
+    const list = [...summarizePoints(orders, bonusRows).values()].sort((a, b) => b.balance - a.balance);
+    const term = q.trim().toLowerCase();
+    return term ? list.filter((r) => r.email.includes(term) || (r.name || "").toLowerCase().includes(term)) : list;
+  }, [orders, bonusRows, q]);
+  const totalBalance = rows.reduce((s, r) => s + Math.max(0, r.balance), 0);
+  const totalUsed = rows.reduce((s, r) => s + r.used, 0);
+  const totalUsedValue = rows.reduce((s, r) => s + r.usedValue, 0);
+  const suspicious = rows.filter((r) => r.balance < 0);
+
+  return (
+    <div className="mb-8 rounded-lg border bg-white p-5" style={{ borderColor: "#E4D9C4" }}>
+      <button onClick={() => setOpen((o) => !o)} className="flex w-full items-center justify-between text-left">
+        <div>
+          <h2 className="text-sm font-semibold uppercase tracking-wide" style={{ color: "#5C6B6E" }}>🎣 Puntos de clientes</h2>
+          <p className="mt-0.5 text-[11px]" style={{ color: "#5C6B6E" }}>
+            Calculado con los pedidos (no con lo que diga el navegador del cliente). {rows.length} clientes · {totalBalance} puntos en circulación · {totalUsed} canjeados ({eur(totalUsedValue)} en descuentos)
+          </p>
+        </div>
+        <span className="text-xs font-semibold" style={{ color: "#E85D42" }}>{open ? "Ocultar" : "Ver"}</span>
+      </button>
+
+      {suspicious.length > 0 && (
+        <p className="mt-3 rounded-md border p-2 text-xs font-semibold" style={{ borderColor: "#B04A2F", color: "#B04A2F", backgroundColor: "#B04A2F10" }}>
+          ⚠️ {suspicious.length} cliente(s) han canjeado más puntos de los que constan: {suspicious.map((r) => r.email).join(", ")}
+        </p>
+      )}
+
+      {open && (
+        <div className="mt-4">
+          <input
+            placeholder="Buscar por email o nombre" value={q} onChange={(e) => setQ(e.target.value)}
+            className="mb-3 w-full rounded-md border px-3 py-1.5 text-xs" style={{ borderColor: "#D9CBB3" }}
+          />
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-xs">
+              <thead>
+                <tr style={{ color: "#5C6B6E" }}>
+                  <th className="py-1 pr-3">Cliente</th><th className="pr-3">Pedidos</th><th className="pr-3">Ganados</th>
+                  <th className="pr-3">Bonus</th><th className="pr-3">Canjeados</th><th className="pr-3">Saldo</th><th>Último pedido</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((r) => (
+                  <tr key={r.email} className="border-t" style={{ borderColor: "#E4D9C4", backgroundColor: r.balance < 0 ? "#B04A2F10" : "transparent" }}>
+                    <td className="py-1.5 pr-3"><span className="font-medium">{r.name || "—"}</span><br /><span style={{ color: "#5C6B6E" }}>{r.email}</span></td>
+                    <td className="pr-3">{r.orders}</td>
+                    <td className="pr-3">{r.earned}</td>
+                    <td className="pr-3">{r.bonus}</td>
+                    <td className="pr-3">{r.used}{r.usedValue > 0 && ` (-${eur(r.usedValue)})`}</td>
+                    <td className="pr-3 font-bold" style={{ color: r.balance < 0 ? "#B04A2F" : "#2F6B5E" }}>{r.balance}</td>
+                    <td>{r.lastDate ? new Date(r.lastDate).toLocaleDateString("es-ES") : "—"}</td>
+                  </tr>
+                ))}
+                {rows.length === 0 && <tr><td colSpan={7} className="py-3 text-center" style={{ color: "#5C6B6E" }}>Sin clientes todavía.</td></tr>}
+              </tbody>
+            </table>
+          </div>
+          <p className="mt-2 text-[10px]" style={{ color: "#5C6B6E" }}>
+            Ganados = pedidos confirmados. Los puntos por reseñas y recetas se guardan solo en el dispositivo del cliente y no se pueden verificar, por eso no se cuentan ni se pueden canjear.
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  ADMIN: eliminar productos de las empresas vendedoras                */
+/* ------------------------------------------------------------------ */
+
+function AdminProductsSection({ vendors, products, deleteProduct }) {
+  const [open, setOpen] = useState(false);
+  const [vendorFilter, setVendorFilter] = useState("all");
+  const [q, setQ] = useState("");
+  const [deleting, setDeleting] = useState(null);
+  const vendorName = (id) => vendors.find((v) => v.id === id)?.name || "Sin empresa";
+  const list = useMemo(() => {
+    const term = q.trim().toLowerCase();
+    return products
+      .filter((p) => (vendorFilter === "all" || p.vendorId === vendorFilter) && (!term || (p.name || "").toLowerCase().includes(term)))
+      .sort((a, b) => vendorName(a.vendorId).localeCompare(vendorName(b.vendorId)) || (a.name || "").localeCompare(b.name || ""));
+  }, [products, vendorFilter, q, vendors]);
+
+  const remove = async (p) => {
+    if (!window.confirm(`¿Eliminar "${p.name}" de ${vendorName(p.vendorId)}? Esta acción no se puede deshacer.`)) return;
+    setDeleting(p.id);
+    try { await deleteProduct(p.id); } finally { setDeleting(null); }
+  };
+
+  return (
+    <div className="mb-8 rounded-lg border bg-white p-5" style={{ borderColor: "#E4D9C4" }}>
+      <button onClick={() => setOpen((o) => !o)} className="flex w-full items-center justify-between text-left">
+        <div>
+          <h2 className="text-sm font-semibold uppercase tracking-wide" style={{ color: "#5C6B6E" }}>🗑️ Productos de las empresas</h2>
+          <p className="mt-0.5 text-[11px]" style={{ color: "#5C6B6E" }}>{products.length} productos de {vendors.length} empresas. Aquí puedes eliminar los que quieras.</p>
+        </div>
+        <span className="text-xs font-semibold" style={{ color: "#E85D42" }}>{open ? "Ocultar" : "Ver"}</span>
+      </button>
+
+      {open && (
+        <div className="mt-4">
+          <div className="mb-3 flex flex-col gap-2 sm:flex-row">
+            <select value={vendorFilter} onChange={(e) => setVendorFilter(e.target.value)} className="rounded-md border px-2 py-1.5 text-xs" style={{ borderColor: "#D9CBB3" }}>
+              <option value="all">Todas las empresas</option>
+              {vendors.map((v) => <option key={v.id} value={v.id}>{v.name}</option>)}
+            </select>
+            <input placeholder="Buscar producto" value={q} onChange={(e) => setQ(e.target.value)} className="flex-1 rounded-md border px-3 py-1.5 text-xs" style={{ borderColor: "#D9CBB3" }} />
+          </div>
+          <div className="flex max-h-96 flex-col overflow-y-auto">
+            {list.map((p) => (
+              <div key={p.id} className="flex items-center justify-between gap-3 border-t py-1.5 text-xs" style={{ borderColor: "#E4D9C4" }}>
+                <div className="min-w-0">
+                  <p className="truncate font-medium">{p.name}</p>
+                  <p className="truncate" style={{ color: "#5C6B6E" }}>{vendorName(p.vendorId)} · {eur(p.price)}</p>
+                </div>
+                <button disabled={deleting === p.id} onClick={() => remove(p)} className="flex shrink-0 items-center gap-1 rounded-md border px-2 py-1 font-semibold disabled:opacity-50" style={{ borderColor: "#B04A2F", color: "#B04A2F" }}>
+                  <Trash2 size={13} /> {deleting === p.id ? "Eliminando…" : "Eliminar"}
+                </button>
+              </div>
+            ))}
+            {list.length === 0 && <p className="py-3 text-center text-xs" style={{ color: "#5C6B6E" }}>No hay productos con ese filtro.</p>}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AdminView({ deleteProduct, vendors, products, orders, auctions, createAuction, cancelAuction, setVendorStatus, setVendorCommission, addVendor, siteSettings, updateSiteSettings, upsertProduct, flashOffers, addFlashOffer, removeFlashOffer, confirmPendingOrderPayment }) {
   const [showNew, setShowNew] = useState(false);
   const [analytics, setAnalytics] = useState(null);
   const [analyticsLoading, setAnalyticsLoading] = useState(true);
@@ -5780,6 +6139,9 @@ function AdminView({ vendors, products, orders, auctions, createAuction, cancelA
         <StatCard icon={TrendingUp} label="Ventas totales (GMV)" value={eur(totalRevenue)} />
         <StatCard icon={ShieldCheck} label="Comisión generada" value={eur(totalCommission)} />
       </div>
+
+      <AdminPointsSection orders={orders} />
+      <AdminProductsSection vendors={vendors} products={products} deleteProduct={deleteProduct} />
 
       {/* PORTADA */}
       <HeroMediaAdminSection siteSettings={siteSettings} updateSiteSettings={updateSiteSettings} />
