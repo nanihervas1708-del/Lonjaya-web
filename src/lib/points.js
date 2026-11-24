@@ -34,6 +34,7 @@ export function summarizePoints(orders, bonusRows = []) {
     if (!r.lastDate || o.date > r.lastDate) r.lastDate = o.date;
   }
   for (const b of bonusRows || []) {
+    if (b.reason === "order_payment") continue; // ya se cuenta en 'ganados' por el pedido
     const email = norm(b.buyer_email);
     if (!email) continue;
     get(email).bonus += b.points || 0;
@@ -43,6 +44,12 @@ export function summarizePoints(orders, bonusRows = []) {
 }
 
 /** Bonificaciones de todos los clientes (solo el admin las ve, por RLS). */
+export async function fetchAllReferrals() {
+  const { data, error } = await supabase.from("referrals").select("referrer_email, referred_email, status, created_at, completed_at").order("created_at", { ascending: false });
+  if (error) return [];
+  return data || [];
+}
+
 export async function fetchAllBonusRows() {
   const { data, error } = await supabase.from("referral_bonus_ledger").select("buyer_email, points, reason, claimed, created_at");
   if (error) return [];
@@ -52,7 +59,7 @@ export async function fetchAllBonusRows() {
 /** Total de bonificaciones del propio comprador (RLS: solo ve las suyas). */
 export async function fetchMyBonusTotal(email) {
   if (!email) return 0;
-  const { data, error } = await supabase.from("referral_bonus_ledger").select("points").eq("buyer_email", email);
+  const { data, error } = await supabase.from("referral_bonus_ledger").select("points, reason").eq("buyer_email", email);
   if (error || !data) return 0;
-  return data.reduce((s, r) => s + (r.points || 0), 0);
+  return data.filter((r) => r.reason !== "order_payment").reduce((s, r) => s + (r.points || 0), 0);
 }

@@ -26,6 +26,43 @@ export async function awardBonusPoints(buyerEmail, points, reason) {
   }
 }
 
+/** Código de recomendación propio del cliente (p. ej. LJ-7K3Q9X). Se crea la
+ * primera vez que lo necesita y se queda fijo. Solo el propio cliente (y el
+ * admin) puede leer su fila: el email de quien recomienda nunca se expone. */
+const CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // sin 0/O/1/I para evitar confusiones
+function randomCode() {
+  const bytes = crypto.getRandomValues(new Uint8Array(6));
+  return "LJ-" + [...bytes].map((b) => CODE_ALPHABET[b % CODE_ALPHABET.length]).join("");
+}
+export async function ensureMyReferralCode(email) {
+  if (!email) return null;
+  const mail = email.trim().toLowerCase();
+  const { data: existing } = await supabase.from("customer_codes").select("code").eq("email", mail).maybeSingle();
+  if (existing?.code) return existing.code;
+  for (let i = 0; i < 5; i++) {
+    const code = randomCode();
+    const { error } = await supabase.from("customer_codes").insert({ email: mail, code });
+    if (!error) return code;
+    // Si falla porque otro dispositivo lo creó a la vez, lo leemos; si fue colisión de código, reintentamos.
+    const { data: again } = await supabase.from("customer_codes").select("code").eq("email", mail).maybeSingle();
+    if (again?.code) return again.code;
+  }
+  return null;
+}
+
+/** Avisa al servidor de que este cliente nuevo viene recomendado por un código. */
+export async function registerReferralByCode(code, referredEmail) {
+  try {
+    await fetch("/.netlify/functions/register-referral", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code, referredEmail }),
+    });
+  } catch {
+    // no crítico
+  }
+}
+
 export async function registerReferral(referrerEmail, referredEmail) {
   if (!referrerEmail || !referredEmail || referrerEmail === referredEmail) return;
   const { error } = await supabase.from("referrals").insert({

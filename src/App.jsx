@@ -7,10 +7,10 @@ import { fetchAuctions, createAuctionRow, cancelAuctionRow, computeCurrentPrice,
 import { fetchFlashOffers, createFlashOffer, deleteFlashOffer, activeOffers } from "./lib/flashOffers";
 import { fetchReviews, submitReview, vendorAverageRating } from "./lib/reviews";
 import { fetchCommunityPosts, createCommunityPost, hideCommunityPost, fetchRecipes, createRecipe, hideRecipe, uploadUserMedia } from "./lib/community";
-import { createProductAlert, registerReferral, completeReferralIfAny, logCheckoutAttempt, markCheckoutConverted, claimPendingBonusPoints, subscribeNewsletter, awardBonusPoints } from "./lib/alerts";
+import { createProductAlert, registerReferral, completeReferralIfAny, logCheckoutAttempt, markCheckoutConverted, claimPendingBonusPoints, subscribeNewsletter, awardBonusPoints, ensureMyReferralCode, registerReferralByCode } from "./lib/alerts";
 import { isPushSupported, subscribeToPush, unsubscribeFromPush, sendPushNotification } from "./lib/push";
 import { sendEmail, sendAdminNotification, buildOrderConfirmationEmail, buildVendorNewOrderEmail, buildAdminNewVendorEmail, buildPendingPaymentEmail, buildAdminOrderEmail, buildBuyerClaimsPaidEmail, buildAdminCardAttemptEmail } from "./lib/emails";
-import { summarizePoints, fetchAllBonusRows, fetchMyBonusTotal } from "./lib/points";
+import { summarizePoints, fetchAllBonusRows, fetchAllReferrals, fetchMyBonusTotal } from "./lib/points";
 import { marked } from "marked";
 import { LEGAL_DOCS } from "./lib/legalContent";
 import {
@@ -52,7 +52,7 @@ const LOYALTY_CONFIG = {
 // Puntos de regalo por "participar" (no por comprar): dejar una reseña,
 // o que alguien a quien has invitado haga su primer pedido.
 const REVIEW_REWARD_POINTS = 30;
-const REFERRAL_REWARD_POINTS = 100;
+const REFERRAL_REWARD_POINTS = 500;
 
 /**
  * Información del socio logístico. Se muestra en checkout, ficha de
@@ -969,11 +969,22 @@ export default function App() {
     goTo("home");
   };
 
-  const registerBuyer = async ({ name, email, phone, password }) => {
+  // Guardamos el código de recomendación del enlace (?ref=LJ-XXXXXX) para
+  // usarlo cuando la persona se registre, aunque navegue antes por la web.
+  useEffect(() => {
+    try {
+      const r = new URLSearchParams(window.location.search).get("ref");
+      if (r) localStorage.setItem("lonjaya_ref", r);
+    } catch {}
+  }, []);
+
+  const registerBuyer = async ({ name, email, phone, password, refCode }) => {
     await signUpBuyer(email, password, { name, phone });
-    const ref = new URLSearchParams(window.location.search).get("ref");
+    let ref = (refCode || "").trim() || new URLSearchParams(window.location.search).get("ref");
+    try { ref = ref || localStorage.getItem("lonjaya_ref"); } catch {}
     if (ref) {
-      try { await registerReferral(decodeURIComponent(ref), email); } catch {}
+      await registerReferralByCode(decodeURIComponent(ref), email);
+      try { localStorage.removeItem("lonjaya_ref"); } catch {}
     }
   };
 
@@ -1213,13 +1224,13 @@ export default function App() {
     if (user?.role === "comprador" && user?.email) fetchMyBonusTotal(user.email).then(setMyBonusTotal).catch(() => {});
     else setMyBonusTotal(0);
   }, [user?.email, user?.role]);
-  /** Saldo que el cliente puede canjear de verdad: el MENOR entre lo que dice
-   * su dispositivo y lo que cuadra con sus pedidos (el dispositivo se puede manipular). */
+  /** Saldo que el cliente puede canjear de verdad: el que cuadra con sus pedidos y
+   * bonificaciones del servidor (el contador del dispositivo se puede manipular). */
   const redeemablePoints = () => {
     const email = (user?.email || "").trim().toLowerCase();
     const row = summarizePoints(orders).get(email);
     const verified = Math.max(0, (row ? row.earned - row.used : 0) + myBonusTotal);
-    return Math.min(points, verified);
+    return verified;
   };
   const sanitizePointsToRedeem = (requested, subtotal) => {
     if (user?.role !== "comprador" || !(subtotal > LOYALTY_CONFIG.minPurchaseToRedeem)) return 0;
@@ -1311,14 +1322,13 @@ export default function App() {
 
     // Si era su primer pedido, comprueba si vino invitado por alguien y
     // reparte la recompensa (a él y a quien le invitó).
-    const isFirstOrder = !orders.some((o) => o.shippingAddress?.email === shippingAddress.email);
-    if (isFirstOrder) {
-      fetch("/.netlify/functions/complete-referral", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ referredEmail: shippingAddress.email }),
-      }).catch(() => {});
-    }
+    // El servidor comprueba que el pedido está confirmado y que la
+    // recomendación es válida, y solo premia una vez.
+    fetch("/.netlify/functions/complete-referral", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ referredEmail: shippingAddress.email }),
+    }).catch(() => {});
     markCheckoutConverted(shippingAddress.email);
 
     return order;
@@ -1479,6 +1489,13 @@ export default function App() {
 
     if (confirmedOrder.pointsEarned > 0 && confirmedOrder.shippingAddress?.email) {
       awardBonusPoints(confirmedOrder.shippingAddress.email, confirmedOrder.pointsEarned, "order_payment");
+    }
+    if (confirmedOrder.shippingAddress?.email) {
+      fetch("/.netlify/functions/complete-referral", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ referredEmail: confirmedOrder.shippingAddress.email }),
+      }).catch(() => {});
     }
 
     sendEmail({ to: confirmedOrder.shippingAddress?.email, ...buildOrderConfirmationEmail(confirmedOrder) });
@@ -4187,9 +4204,14 @@ function ReviewForm({ line, order, reviews, user, addReview }) {
 
 function ReferralBox({ user }) {
   const [copied, setCopied] = useState(false);
-  const link = `https://lonjaya.com/?ref=${encodeURIComponent(user?.email || "")}`;
+  const [code, setCode] = useState(null);
+  useEffect(() => {
+    if (user?.email) ensureMyReferralCode(user.email).then(setCode).catch(() => {});
+  }, [user?.email]);
+  const link = code ? `https://lonjaya.com/?ref=${encodeURIComponent(code)}` : "";
 
   const copy = async () => {
+    if (!link) return;
     try {
       await navigator.clipboard.writeText(link);
       setCopied(true);
@@ -4201,10 +4223,13 @@ function ReferralBox({ user }) {
     <div className="mb-5 rounded-lg border p-4" style={{ borderColor: "#B08900", backgroundColor: "#B0890010" }}>
       <p className="text-sm font-semibold" style={{ color: "#8A6A00" }}>🎁 Invita a un amigo</p>
       <p className="mt-1 text-xs" style={{ color: "#5C6B6E" }}>
-        Cuando alguien se registre con tu enlace y haga su primer pedido, ganáis <strong>{REFERRAL_REWARD_POINTS} puntos LonjaYa</strong> cada uno.
+        Cuando alguien se registre con tu código y haga su primer pedido, ganáis <strong>{REFERRAL_REWARD_POINTS} puntos LonjaYa</strong> cada uno, para canjear a partir de vuestra siguiente compra.
       </p>
-      <div className="mt-2 flex gap-2">
-        <input readOnly value={link} className="flex-1 rounded border bg-white px-2 py-1.5 text-xs" style={{ borderColor: "#D9CBB3" }} onClick={(e) => e.target.select()} />
+      <p className="mt-2 text-xs" style={{ color: "#5C6B6E" }}>Tu código:</p>
+      <p className="text-2xl font-bold tracking-widest" style={{ color: "#0E3A45", fontFamily: "'Fraunces', serif" }}>{code || "…"}</p>
+      <p className="mt-2 text-xs" style={{ color: "#5C6B6E" }}>Tu enlace para compartir:</p>
+      <div className="mt-1 flex gap-2">
+        <input readOnly value={link || "Generando tu código…"} className="flex-1 rounded border bg-white px-2 py-1.5 text-xs" style={{ borderColor: "#D9CBB3" }} onClick={(e) => e.target.select()} />
         <button onClick={copy} className="shrink-0 rounded-md px-3 py-1.5 text-xs font-semibold text-white" style={{ backgroundColor: "#0E3A45" }}>
           {copied ? "¡Copiado!" : "Copiar"}
         </button>
@@ -4574,7 +4599,8 @@ function LoginView({ loginBuyer, loginAdmin, loginVendor, goTo }) {
 /* ------------------------------------------------------------------ */
 
 function BuyerSignupView({ registerBuyer, goTo }) {
-  const [form, setForm] = useState({ name: "", email: "", phone: "", password: "", password2: "" });
+  const initialRef = (() => { try { return new URLSearchParams(window.location.search).get("ref") || localStorage.getItem("lonjaya_ref") || ""; } catch { return ""; } })();
+  const [form, setForm] = useState({ name: "", email: "", phone: "", password: "", password2: "", refCode: initialRef });
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
   const [done, setDone] = useState(false);
@@ -4622,6 +4648,8 @@ function BuyerSignupView({ registerBuyer, goTo }) {
         <input placeholder="Tu nombre" value={form.name} onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} className="rounded border px-3 py-2 text-sm" style={{ borderColor: "#D9CBB3" }} />
         <input type="email" placeholder="Email" value={form.email} onChange={(e) => setForm((f) => ({ ...f, email: e.target.value }))} className="rounded border px-3 py-2 text-sm" style={{ borderColor: "#D9CBB3" }} />
         <input type="tel" placeholder="Teléfono de contacto" value={form.phone} onChange={(e) => setForm((f) => ({ ...f, phone: e.target.value }))} className="rounded border px-3 py-2 text-sm" style={{ borderColor: "#D9CBB3" }} />
+        <input placeholder="Código de recomendación (opcional, ej. LJ-7K3Q9X)" value={form.refCode} onChange={(e) => setForm((f) => ({ ...f, refCode: e.target.value.toUpperCase() }))} className="rounded border px-3 py-2 text-sm" style={{ borderColor: "#D9CBB3" }} />
+        {form.refCode.trim() && <p className="-mt-1 text-[11px]" style={{ color: "#2F6B5E" }}>🎁 Ganaréis {REFERRAL_REWARD_POINTS} puntos cada uno cuando hagas tu primer pedido.</p>}
         <input type="password" placeholder="Contraseña (mín. 6)" value={form.password} onChange={(e) => setForm((f) => ({ ...f, password: e.target.value }))} className="rounded border px-3 py-2 text-sm" style={{ borderColor: "#D9CBB3" }} />
         <input
           type="password" placeholder="Repite la contraseña" value={form.password2} onChange={(e) => setForm((f) => ({ ...f, password2: e.target.value }))}
@@ -5949,7 +5977,8 @@ function AdminPointsSection({ orders }) {
   const [bonusRows, setBonusRows] = useState([]);
   const [q, setQ] = useState("");
   const [open, setOpen] = useState(false);
-  useEffect(() => { fetchAllBonusRows().then(setBonusRows).catch(() => {}); }, [orders.length]);
+  const [referrals, setReferrals] = useState([]);
+  useEffect(() => { fetchAllBonusRows().then(setBonusRows).catch(() => {}); fetchAllReferrals().then(setReferrals).catch(() => {}); }, [orders.length]);
   const rows = useMemo(() => {
     const list = [...summarizePoints(orders, bonusRows).values()].sort((a, b) => b.balance - a.balance);
     const term = q.trim().toLowerCase();
@@ -6008,7 +6037,24 @@ function AdminPointsSection({ orders }) {
               </tbody>
             </table>
           </div>
-          <p className="mt-2 text-[10px]" style={{ color: "#5C6B6E" }}>
+          <h3 className="mb-1 mt-5 text-xs font-semibold uppercase tracking-wide" style={{ color: "#5C6B6E" }}>
+            Recomendaciones ({referrals.filter((r) => r.status === "completed").length} completadas · {referrals.filter((r) => r.status === "pending").length} pendientes)
+          </h3>
+          {referrals.length === 0 ? (
+            <p className="text-[11px]" style={{ color: "#5C6B6E" }}>Todavía no hay recomendaciones.</p>
+          ) : (
+            <div className="flex flex-col">
+              {referrals.map((r) => (
+                <p key={r.referred_email} className="border-t py-1 text-[11px]" style={{ borderColor: "#E4D9C4" }}>
+                  <strong>{r.referrer_email}</strong> → {r.referred_email} ·{" "}
+                  <span style={{ color: r.status === "completed" ? "#2F6B5E" : r.status === "rejected" ? "#B04A2F" : "#8A6A00", fontWeight: 600 }}>
+                    {r.status === "completed" ? "completada (+500 cada uno)" : r.status === "rejected" ? "rechazada (mismos datos)" : "pendiente de primer pedido"}
+                  </span>
+                </p>
+              ))}
+            </div>
+          )}
+          <p className="mt-3 text-[10px]" style={{ color: "#5C6B6E" }}>
             Ganados = pedidos confirmados. Los puntos por reseñas y recetas se guardan solo en el dispositivo del cliente y no se pueden verificar, por eso no se cuentan ni se pueden canjear.
           </p>
         </div>
