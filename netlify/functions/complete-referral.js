@@ -37,17 +37,18 @@ exports.handler = async (event) => {
       .from("referrals").select("*").eq("referred_email", referredLc).eq("status", "pending").maybeSingle();
     if (!referral) return { statusCode: 200, body: JSON.stringify({ completed: false }) };
 
-    const { data: ordersRow } = await supabase.from("app_storage").select("value").eq("key", "lonja:orders").eq("shared", true).maybeSingle();
-    const orders = Array.isArray(ordersRow?.value) ? ordersRow.value : [];
-    const byEmail = (email) => orders.filter((o) => (o.shippingAddress?.email || "").trim().toLowerCase() === email);
+    const byEmail = async (email) => {
+      const { data } = await supabase.from("orders").select("status, data").eq("buyer_email", email);
+      return (data || []).map((r) => ({ ...r.data, status: r.status }));
+    };
 
-    const referredOrders = byEmail(referredLc);
+    const referredOrders = await byEmail(referredLc);
     if (!referredOrders.some((o) => o.status === "confirmado")) {
       return { statusCode: 200, body: JSON.stringify({ completed: false, reason: "sin_pedido_confirmado" }) };
     }
 
     // Antifraude: no puede compartir teléfono ni dirección con quien le recomienda.
-    const referrerOrders = byEmail(String(referral.referrer_email).toLowerCase());
+    const referrerOrders = await byEmail(String(referral.referrer_email).toLowerCase());
     const refPhones = new Set(referrerOrders.map((o) => phoneKey(o.shippingAddress?.phone)).filter((p) => p.length === 9));
     const refAddrs = new Set(referrerOrders.map((o) => addrKey(o.shippingAddress)).filter((a) => a.length > 8));
     const sameHousehold = referredOrders.some(

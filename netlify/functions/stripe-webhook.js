@@ -51,28 +51,17 @@ exports.handler = async (event) => {
   try {
     const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
 
-    const { data: row, error: readError } = await supabase
-      .from("app_storage")
-      .select("value")
-      .eq("key", "lonja:orders")
-      .eq("shared", true)
-      .eq("user_id", SHARED_MARKER)
-      .maybeSingle();
-    if (readError || !row) throw new Error("No se pudo leer la lista de pedidos");
-
-    const orders = JSON.parse(row.value);
-    const idx = orders.findIndex((o) => o.id === orderId);
-    if (idx === -1) throw new Error(`Pedido ${orderId} no encontrado`);
-    if (orders[idx].status === "confirmado") {
+    const { data: row, error: readError } = await supabase.from("orders").select("data, status").eq("id", orderId).maybeSingle();
+    if (readError || !row) throw new Error(`Pedido ${orderId} no encontrado`);
+    if (row.status === "confirmado") {
       return { statusCode: 200, body: "ya estaba confirmado" }; // evita duplicar si Stripe reintenta el evento
     }
 
-    const order = { ...orders[idx], status: "confirmado", payment: { provider: "stripe", stripeSessionId: session.id } };
-    orders[idx] = order;
-
+    const order = { ...row.data, status: "confirmado", payment: { provider: "stripe", stripeSessionId: session.id } };
     const { error: writeError } = await supabase
-      .from("app_storage")
-      .upsert({ key: "lonja:orders", value: JSON.stringify(orders), shared: true, user_id: SHARED_MARKER }, { onConflict: "key,shared,user_id" });
+      .from("orders")
+      .update({ data: order, status: "confirmado", updated_at: new Date().toISOString() })
+      .eq("id", orderId);
     if (writeError) throw writeError;
 
     // Descuenta stock de verdad

@@ -6,6 +6,7 @@
  */
 
 const Stripe = require("stripe");
+const { createClient } = require("@supabase/supabase-js");
 
 exports.handler = async (event) => {
   if (event.httpMethod !== "POST") {
@@ -13,10 +14,21 @@ exports.handler = async (event) => {
   }
   try {
     const stripe = Stripe(process.env.STRIPE_SECRET_KEY);
-    const { orderId, amount, email, description } = JSON.parse(event.body || "{}");
+    const { orderId, email, description } = JSON.parse(event.body || "{}");
 
-    if (!orderId || !amount || amount <= 0) {
+    if (!orderId) {
       return { statusCode: 400, body: JSON.stringify({ error: "Faltan datos del pedido" }) };
+    }
+
+    // El importe sale SIEMPRE del pedido guardado en el servidor, no del navegador.
+    const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
+    const { data: row } = await supabase.from("orders").select("data, status").eq("id", orderId).maybeSingle();
+    if (!row || row.status !== "pendiente_pago") {
+      return { statusCode: 400, body: JSON.stringify({ error: "El pedido no existe o ya no está pendiente de pago" }) };
+    }
+    const amount = Number(row.data.total);
+    if (!(amount > 0)) {
+      return { statusCode: 400, body: JSON.stringify({ error: "Importe del pedido no válido" }) };
     }
 
     const siteUrl = process.env.URL || "https://lonjaya.com";

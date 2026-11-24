@@ -11,6 +11,7 @@ import { createProductAlert, registerReferral, completeReferralIfAny, logCheckou
 import { isPushSupported, subscribeToPush, unsubscribeFromPush, sendPushNotification } from "./lib/push";
 import { sendEmail, sendAdminNotification, buildOrderConfirmationEmail, buildVendorNewOrderEmail, buildAdminNewVendorEmail, buildPendingPaymentEmail, buildAdminOrderEmail, buildBuyerClaimsPaidEmail, buildAdminCardAttemptEmail } from "./lib/emails";
 import { summarizePoints, fetchAllBonusRows, fetchAllReferrals, fetchMyBonusTotal } from "./lib/points";
+import { fetchOrders, createOrderApi, quoteApi, setOrderStatusApi, claimPaidApi, orderStatusApi } from "./lib/orders";
 import { marked } from "marked";
 import { LEGAL_DOCS } from "./lib/legalContent";
 import {
@@ -725,7 +726,7 @@ export default function App() {
       // a la vez en vez de uno a uno — esto es lo que antes hacía que la
       // web tardara 10-20 segundos en cargar en vez de 1-2.
       const [o, c, u0, pts, auc, settings, rv, posts, recs, flash, sessionUser] = await Promise.all([
-        loadShared("lonja:orders", []),
+        fetchOrders().catch(() => []),
         loadPersonal("lonja:cart", []),
         loadPersonal("lonja:user", null),
         loadPersonal("lonja:points", 0),
@@ -771,14 +772,13 @@ export default function App() {
           setTimeout(() => showToast("Pago cancelado — tu pedido sigue reservado, puedes volver a intentarlo desde \"Mis pedidos\"."), 300);
           setView("mis-pedidos");
         } else {
-          let found = o.find((ord) => ord.id === stripeOrderId);
-          let tries = 0;
-          while (found && found.status !== "confirmado" && tries < 6) {
+          // El cliente (aunque no tenga cuenta) solo puede consultar el estado mínimo del pedido.
+          let found = null;
+          for (let tries = 0; tries < 7; tries++) {
+            const st = await orderStatusApi(stripeOrderId);
+            found = st.ok ? st.order : found;
+            if (found?.status === "confirmado") break;
             await new Promise((r) => setTimeout(r, 1500));
-            const fresh = await loadShared("lonja:orders", o);
-            found = fresh.find((ord) => ord.id === stripeOrderId);
-            if (found) setOrders(fresh);
-            tries++;
           }
           if (found) {
             setLastOrder(found);
@@ -816,6 +816,12 @@ export default function App() {
       clearInterval(heartbeat);
     };
   }, []);
+
+  // Los pedidos que ve cada persona dependen de su sesión (cliente: los suyos,
+  // vendedor: los suyos, admin: todos), así que se vuelven a cargar al entrar/salir.
+  useEffect(() => {
+    fetchOrders().then(setOrders).catch(() => setOrders([]));
+  }, [authUser?.id]);
 
   // Traduce la sesión cruda de Supabase Auth (authUser) al usuario de la app:
   // admin, vendedor, o comprador (según los metadatos de la cuenta).
@@ -1216,6 +1222,19 @@ export default function App() {
     });
   };
 
+  /** Guarda un pedido NUEVO en el servidor (que valida precios, descuentos, puntos y pago).
+   * Devuelve el pedido tal y como lo ha guardado el servidor, o null si lo rechaza. */
+  const saveOrderOnServer = async (draft, paypalOrderId = null) => {
+    const res = await createOrderApi(draft, paypalOrderId);
+    if (!res.ok || !res.order) {
+      console.error("Pedido rechazado:", res.error);
+      if (res.status >= 400 && res.status < 500 && res.error) showToast(res.error);
+      return null;
+    }
+    setOrders((prev) => [res.order, ...prev.filter((o) => o.id !== res.order.id)]);
+    return res.order;
+  };
+
   /** Puntos que se pueden canjear de verdad en esta compra: solo clientes con
    * cuenta, solo si la compra supera el mínimo, en bloques de rewardThreshold,
    * sin pasar del máximo por compra ni del saldo del cliente. */
@@ -1252,7 +1271,7 @@ export default function App() {
     const earnedPoints = Math.round(cartTotal * LOYALTY_CONFIG.pointsPerEuro);
     const pointsUsed = sanitizePointsToRedeem(pointsRequested, cartTotal);
     const pointsDiscount = pointsToEuros(pointsUsed);
-    const order = {
+    let order = {
       id: "o" + Date.now(),
       user: user?.name || "Invitado",
       date: new Date().toISOString(),
@@ -1275,20 +1294,18 @@ export default function App() {
       status: "confirmado",
       pointsEarned: earnedPoints,
     };
-    const next = [order, ...orders];
-    const saved = await saveShared("lonja:orders", next);
-    if (!saved) {
-      // Ya se ha cobrado el pago (PayPal), así que no podemos fingir que no
-      // ha pasado nada: avisamos claramente y NO mostramos "confirmado" con
-      // datos que en realidad no se han guardado.
+    // Ya se ha cobrado el pago (PayPal), así que no podemos fingir que no ha
+    // pasado nada: avisamos claramente y NO mostramos "confirmado" con datos
+    // que en realidad no se han guardado.
+    const created = await saveOrderOnServer(order, payment?.paypalOrderId);
+    if (!created) {
       showToast("El pago se completó pero hubo un problema al guardar tu pedido. Contacta con nosotros indicando la hora exacta.");
-      setOrders(orders); // revertimos el estado local optimista
       throw new Error("No se pudo guardar el pedido tras el pago");
     }
-    setOrders(next);
+    order = created;
     setCart([]);
     await savePersonal("lonja:cart", []);
-    const nextPoints = points - pointsUsed + earnedPoints;
+    const nextPoints = points - (order.pointsUsed || 0) + (order.pointsEarned || 0);
     setPoints(nextPoints);
     await savePersonal("lonja:points", nextPoints);
     setLastOrder(order);
@@ -1340,7 +1357,7 @@ export default function App() {
     const earnedPoints = Math.round(cartTotal * LOYALTY_CONFIG.pointsPerEuro);
     const pointsUsed = sanitizePointsToRedeem(pointsRequested, cartTotal);
     const pointsDiscount = pointsToEuros(pointsUsed);
-    const order = {
+    let order = {
       id: "o" + Date.now(),
       user: user?.name || "Invitado",
       date: new Date().toISOString(),
@@ -1363,16 +1380,15 @@ export default function App() {
       status: "pendiente_pago",
       pointsEarned: earnedPoints,
     };
-    const next = [order, ...orders];
-    const saved = await saveShared("lonja:orders", next);
-    if (!saved) {
+    const created = await saveOrderOnServer(order);
+    if (!created) {
       showToast("No se pudo reservar tu pedido. Inténtalo de nuevo en unos minutos.");
       throw new Error("No se pudo guardar el pedido pendiente de pago");
     }
-    setOrders(next);
+    order = created;
     setCart([]);
     await savePersonal("lonja:cart", []);
-    await spendPoints(pointsUsed);
+    await spendPoints(order.pointsUsed || 0);
     setLastOrder(order);
 
     sendEmail({
@@ -1398,7 +1414,7 @@ export default function App() {
     const earnedPoints = Math.round(cartTotal * LOYALTY_CONFIG.pointsPerEuro);
     const pointsUsed = sanitizePointsToRedeem(pointsRequested, cartTotal);
     const pointsDiscount = pointsToEuros(pointsUsed);
-    const order = {
+    let order = {
       id: "o" + Date.now(),
       user: user?.name || "Invitado",
       date: new Date().toISOString(),
@@ -1421,14 +1437,13 @@ export default function App() {
       status: "pendiente_pago",
       pointsEarned: earnedPoints,
     };
-    const next = [order, ...orders];
-    const saved = await saveShared("lonja:orders", next);
-    if (!saved) {
+    const created = await saveOrderOnServer(order);
+    if (!created) {
       showToast("No se pudo reservar tu pedido. Inténtalo de nuevo en unos minutos.");
       throw new Error("No se pudo guardar el pedido antes de ir a Stripe");
     }
-    setOrders(next);
-    await spendPoints(pointsUsed);
+    order = created;
+    await spendPoints(order.pointsUsed || 0);
     setLastOrder(order);
 
     // Aviso inmediato al admin: aunque el cliente abandone Stripe o la
@@ -1471,14 +1486,13 @@ export default function App() {
     const order = orders.find((o) => o.id === orderId);
     if (!order || order.status !== "pendiente_pago") return;
 
-    const confirmedOrder = { ...order, status: "confirmado" };
-    const next = orders.map((o) => (o.id === orderId ? confirmedOrder : o));
-    const saved = await saveShared("lonja:orders", next);
-    if (!saved) {
-      showToast("No se pudo confirmar el pedido, inténtalo de nuevo.");
+    const res = await setOrderStatusApi(orderId, "confirmado");
+    if (!res.ok || !res.order) {
+      showToast(res.error || "No se pudo confirmar el pedido, inténtalo de nuevo.");
       return;
     }
-    setOrders(next);
+    const confirmedOrder = res.order;
+    setOrders((prev) => prev.map((o) => (o.id === orderId ? confirmedOrder : o)));
 
     for (const l of confirmedOrder.lines) {
       try {
@@ -1517,14 +1531,13 @@ export default function App() {
   const markOrderClaimedPaid = async (orderId) => {
     const order = orders.find((o) => o.id === orderId);
     if (!order) return false;
-    const updated = { ...order, claimedPaidAt: new Date().toISOString() };
-    const next = orders.map((o) => (o.id === orderId ? updated : o));
-    const saved = await saveShared("lonja:orders", next);
-    if (!saved) {
+    const res = await claimPaidApi(orderId);
+    if (!res.ok || !res.order) {
       showToast("No se pudo enviar el aviso, inténtalo de nuevo.");
       return false;
     }
-    setOrders(next);
+    const updated = res.order;
+    setOrders((prev) => prev.map((o) => (o.id === orderId ? updated : o)));
     sendAdminNotification(buildBuyerClaimsPaidEmail(updated));
     showToast("Avisado — en cuanto lo confirmen, verás tu pedido pasar a confirmado.");
     return true;
@@ -1559,7 +1572,7 @@ export default function App() {
     const shippingCost = shippingCostForWeight(product?.unit === "kg" ? 1 : 1);
     const earnedPoints = Math.round(price * LOYALTY_CONFIG.pointsPerEuro);
 
-    const order = {
+    let order = {
       id: "oa" + Date.now(),
       user: user?.name || "Invitado",
       date: new Date().toISOString(),
@@ -1576,15 +1589,15 @@ export default function App() {
       status: "confirmado",
       pointsEarned: earnedPoints,
       isAuction: true,
+      auctionId: auction.id,
     };
-    const next = [order, ...orders];
-    const saved = await saveShared("lonja:orders", next);
-    if (!saved) {
+    const created = await saveOrderOnServer(order, payment?.paypalOrderId);
+    if (!created) {
       showToast("El pago se completó pero hubo un problema al guardar tu pedido. Contacta con nosotros indicando la hora exacta.");
       throw new Error("No se pudo guardar el pedido tras el pago");
     }
-    setOrders(next);
-    const nextPoints = points + earnedPoints;
+    order = created;
+    const nextPoints = points + (order.pointsEarned || 0);
     setPoints(nextPoints);
     await savePersonal("lonja:points", nextPoints);
     setLastOrder(order);
@@ -3456,15 +3469,27 @@ function CheckoutView({ lines, total, user, placeOrder, placeOrderPendingPayment
   const validCode = siteSettings?.discountCode || "BIENVENIDA10";
   const discountPct = siteSettings?.discountPercent ?? 10;
   const discountActive = siteSettings?.discountActive !== false;
-  const eligibleForDiscount = isFirstPurchase(form);
+  // El servidor (que ve TODOS los pedidos) decide si hay derecho al descuento de primera compra
+  // y cuántos puntos se pueden canjear; el navegador solo ve sus propios pedidos.
+  const [serverQuote, setServerQuote] = useState(null);
+  useEffect(() => {
+    const t = setTimeout(() => {
+      quoteApi({ email: form.email, phone: form.phone, address: form.address, postal: form.postal })
+        .then((q) => { if (q.ok) setServerQuote({ firstPurchase: q.firstPurchase, redeemablePoints: q.redeemablePoints }); })
+        .catch(() => {});
+    }, 600);
+    return () => clearTimeout(t);
+  }, [form.email, form.phone, form.address, form.postal]);
+  const eligibleForDiscount = serverQuote ? serverQuote.firstPurchase : isFirstPurchase(form);
   const discountAmount = discountApplied && eligibleForDiscount ? Math.round(total * (discountPct / 100) * 100) / 100 : 0;
   // Canje de puntos: solo con cuenta, compra > minPurchaseToRedeem, bloques de rewardThreshold, tope por compra.
   const [pointsToUse, setPointsToUse] = useState(0);
   const redeemBlock = LOYALTY_CONFIG.rewardThreshold;
   const isBuyer = user?.role === "comprador";
   const purchaseBigEnough = total > LOYALTY_CONFIG.minPurchaseToRedeem;
+  const availablePoints = serverQuote ? serverQuote.redeemablePoints : points;
   const maxRedeemable = isBuyer && purchaseBigEnough
-    ? Math.min(LOYALTY_CONFIG.maxRedeemPerOrder, Math.floor(points / redeemBlock) * redeemBlock)
+    ? Math.min(LOYALTY_CONFIG.maxRedeemPerOrder, Math.floor(availablePoints / redeemBlock) * redeemBlock)
     : 0;
   const effectivePoints = Math.min(pointsToUse, maxRedeemable);
   const pointsDiscount = (effectivePoints / redeemBlock) * LOYALTY_CONFIG.rewardValue;
@@ -3672,17 +3697,17 @@ function CheckoutView({ lines, total, user, placeOrder, placeOrderPendingPayment
             <p className="text-[11px]" style={{ color: "#5C6B6E" }}>
               🎣 Inicia sesión para canjear tus puntos LonjaYa (cada {redeemBlock} puntos = {eur(LOYALTY_CONFIG.rewardValue)}).
             </p>
-          ) : points < redeemBlock ? (
+          ) : availablePoints < redeemBlock ? (
             <p className="text-[11px]" style={{ color: "#5C6B6E" }}>
-              🎣 Tienes {points} puntos. Con {redeemBlock} puntos podrás canjear {eur(LOYALTY_CONFIG.rewardValue)} en compras de más de {eur(LOYALTY_CONFIG.minPurchaseToRedeem)}.
+              🎣 Tienes {availablePoints} puntos. Con {redeemBlock} puntos podrás canjear {eur(LOYALTY_CONFIG.rewardValue)} en compras de más de {eur(LOYALTY_CONFIG.minPurchaseToRedeem)}.
             </p>
           ) : !purchaseBigEnough ? (
             <p className="text-[11px]" style={{ color: "#5C6B6E" }}>
-              🎣 Tienes {points} puntos. Podrás canjearlos en compras de más de {eur(LOYALTY_CONFIG.minPurchaseToRedeem)} (hasta {LOYALTY_CONFIG.maxRedeemPerOrder} puntos = {eur((LOYALTY_CONFIG.maxRedeemPerOrder / redeemBlock) * LOYALTY_CONFIG.rewardValue)} por compra).
+              🎣 Tienes {availablePoints} puntos. Podrás canjearlos en compras de más de {eur(LOYALTY_CONFIG.minPurchaseToRedeem)} (hasta {LOYALTY_CONFIG.maxRedeemPerOrder} puntos = {eur((LOYALTY_CONFIG.maxRedeemPerOrder / redeemBlock) * LOYALTY_CONFIG.rewardValue)} por compra).
             </p>
           ) : (
             <div>
-              <p className="text-xs font-semibold" style={{ color: "#8A6A00" }}>🎣 Canjear puntos LonjaYa (tienes {points})</p>
+              <p className="text-xs font-semibold" style={{ color: "#8A6A00" }}>🎣 Canjear puntos LonjaYa (tienes {availablePoints})</p>
               <div className="mt-1.5 flex flex-wrap gap-1.5">
                 <button type="button" onClick={() => setPointsToUse(0)} className="rounded-md border px-2.5 py-1 text-[11px] font-semibold"
                   style={{ borderColor: "#B08900", backgroundColor: effectivePoints === 0 ? "#B08900" : "transparent", color: effectivePoints === 0 ? "#fff" : "#8A6A00" }}>

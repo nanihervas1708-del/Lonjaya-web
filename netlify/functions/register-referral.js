@@ -26,9 +26,8 @@ exports.handler = async (event) => {
     const { data: existing } = await supabase.from("referrals").select("id").eq("referred_email", referred).maybeSingle();
     if (existing) return { statusCode: 200, body: JSON.stringify({ registered: false, reason: "ya_recomendado" }) };
 
-    const { data: ordersRow } = await supabase.from("app_storage").select("value").eq("key", "lonja:orders").eq("shared", true).maybeSingle();
-    const orders = Array.isArray(ordersRow?.value) ? ordersRow.value : [];
-    const alreadyBought = orders.some((o) => o.status !== "cancelado" && (o.shippingAddress?.email || "").trim().toLowerCase() === referred);
+    const { data: prior } = await supabase.from("orders").select("status").eq("buyer_email", referred);
+    const alreadyBought = (prior || []).some((o) => o.status !== "cancelado");
     if (alreadyBought) return { statusCode: 200, body: JSON.stringify({ registered: false, reason: "ya_ha_comprado" }) };
 
     const { error } = await supabase.from("referrals").insert({ referrer_email: referrer, referred_email: referred, status: "pending" });
